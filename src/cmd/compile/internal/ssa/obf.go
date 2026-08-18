@@ -81,10 +81,18 @@ type protectionRNG struct {
 }
 
 func newProtectionRNG(f *Func) *protectionRNG {
+	return newProtectionRNGDomain(f, "")
+}
+
+func newProtectionRNGDomain(f *Func, domain string) *protectionRNG {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(base.Debug.ObfSeed))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(protectionFunctionName(f)))
+	if domain != "" {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(domain))
+	}
 	seed := h.Sum64()
 	if seed == 0 {
 		seed = 0x6a09e667f3bcc909
@@ -146,26 +154,42 @@ func obfVirtualize(f *Func) {
 		return
 	}
 
+	beforeBlocks, beforeValues := protectionShape(f)
 	program, err := buildVM2Program(f)
 	if err != nil {
 		protectionError(f, "vm", "%v", err)
 		return
 	}
-	if err := installVM2Program(f, program, flags&ir.ProtectEncrypt != 0); err != nil {
+	vm3, err := buildVM3Program(program, newProtectionRNGDomain(f, "vm3-layout"))
+	if err != nil {
 		protectionError(f, "vm", "%v", err)
 		return
 	}
-
-	applied := fmt.Sprintf("vm=register-threaded-v2 instructions=%d registers=%d blocks=%d branches=%d checks=%d decoys=%d",
-		len(program.instructions), len(program.registers), len(program.blocks), program.branches, program.checks, program.decoys)
-	if flags&ir.ProtectEncrypt != 0 {
-		applied += " encrypt=const64-state-v2"
+	if err := installVM3Program(f, vm3, flags&ir.ProtectEncrypt != 0); err != nil {
+		protectionError(f, "vm", "%v", err)
+		return
 	}
-	applied += " dispatch=random-checks-v1"
+	afterBlocks, afterValues := protectionShape(f)
+
+	applied := fmt.Sprintf("vm=register-threaded-v3 instructions=%d states=%d fused=%d terminal-fused=%d registers=%d source-blocks=%d branches=%d buckets=%d checks=%d decoys=%d cfg-blocks=%d->%d cfg-values=%d->%d",
+		len(program.instructions), len(vm3.units), vm3.fused, vm3.terminalFused, len(program.registers), len(program.blocks), program.branches,
+		vm3.buckets, vm3.checks, vm3.decoys, beforeBlocks, afterBlocks, beforeValues, afterValues)
+	if flags&ir.ProtectEncrypt != 0 {
+		applied += " encrypt=const64-state-v3"
+	}
+	applied += " dispatch=bucketed-islands-v1"
 	if flags&ir.ProtectObfuscate != 0 {
-		applied += " obf=vm-dispatch-v2"
+		applied += " obf=vm-dispatch-v3"
 	}
 	reportProtection(f, flags, applied)
+}
+
+func protectionShape(f *Func) (blocks, values int) {
+	blocks = len(f.Blocks)
+	for _, b := range f.Blocks {
+		values += len(b.Values)
+	}
+	return blocks, values
 }
 
 func obfHarden(f *Func) {
@@ -797,8 +821,6 @@ type vm2Program struct {
 	initMem      *Value
 	sourceArg    *Value
 	branches     int
-	checks       int
-	decoys       int
 }
 
 const (
@@ -1165,23 +1187,166 @@ func buildVM2Program(f *Func) (*vm2Program, error) {
 	return p, nil
 }
 
-type vm2DispatchKind uint8
+// vm3 groups consecutive VM execution instructions into super-instructions.
+// A block terminator may share the same handler as the final execution unit;
+// this removes a dispatcher round trip without changing edge semantics.
+type vm3Unit struct {
+	kind  vm2InstructionKind
+	first int
+	count int
+	term  int
+	pos   src.XPos
 
-const (
-	vm2InitialEdge vm2DispatchKind = iota
-	vm2ExecEdge
-	vm2MoveEdge
-	vm2InvalidEdge
-)
-
-type vm2DispatchInfo struct {
-	kind  vm2DispatchKind
-	inst  *vm2Instruction
-	moves []vm2Move
-	next  int
+	next       int
+	control    int
+	edges      [2]vm2Edge
+	returnReg  int
+	resultType *types.Type
 }
 
-func vm2StateConstant(b *Block, source *Value, pos src.XPos, value uint64, rng *protectionRNG, encrypt bool) *Value {
+type vm3Program struct {
+	source        *vm2Program
+	units         []vm3Unit
+	sourceToUnit  []int
+	buckets       int
+	checks        int
+	decoys        int
+	fused         int
+	terminalFused int
+}
+
+const vm3MaxBundleOps = 8
+
+func vm3BucketCount(states int) int {
+	switch {
+	case states >= 64:
+		return 8
+	case states >= 24:
+		return 4
+	case states >= 8:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func vm2TerminatorIndices(source *vm2Program) map[int]bool {
+	terms := make(map[int]bool, len(source.blocks))
+	if len(source.blocks) == 0 {
+		for i, inst := range source.instructions {
+			if inst.kind != vm2Exec {
+				terms[i] = true
+			}
+		}
+		return terms
+	}
+	for i, block := range source.blocks {
+		first := source.blockFirst[block]
+		end := len(source.instructions)
+		if i+1 < len(source.blocks) {
+			end = source.blockFirst[source.blocks[i+1]]
+		}
+		if end > first {
+			terms[end-1] = true
+		}
+	}
+	return terms
+}
+
+func buildVM3Program(source *vm2Program, rng *protectionRNG) (*vm3Program, error) {
+	if source == nil || len(source.instructions) == 0 || rng == nil {
+		return nil, fmt.Errorf("invalid v3 source program")
+	}
+	p := &vm3Program{
+		source:       source,
+		sourceToUnit: make([]int, len(source.instructions)),
+	}
+	termIndices := vm2TerminatorIndices(source)
+	for i := 0; i < len(source.instructions); {
+		inst := &source.instructions[i]
+		unit := vm3Unit{kind: inst.kind, first: i, term: i, pos: inst.pos}
+		if inst.kind == vm2Exec {
+			unit.term = -1
+			run := 0
+			for i+run < len(source.instructions) && source.instructions[i+run].kind == vm2Exec && run < vm3MaxBundleOps {
+				run++
+			}
+			width := 2 + int(rng.next()%uint64(vm3MaxBundleOps-1))
+			if width > run {
+				width = run
+			}
+			unit.count = width
+			for j := 0; j < width; j++ {
+				p.sourceToUnit[i+j] = len(p.units)
+			}
+			i += width
+			if i < len(source.instructions) && termIndices[i] && source.instructions[i].kind != vm2Branch {
+				unit.kind = source.instructions[i].kind
+				unit.term = i
+				unit.pos = source.instructions[i].pos
+				p.sourceToUnit[i] = len(p.units)
+				p.terminalFused++
+				i++
+			}
+		} else {
+			p.sourceToUnit[i] = len(p.units)
+			i++
+		}
+		p.units = append(p.units, unit)
+	}
+
+	for i := range p.units {
+		unit := &p.units[i]
+		switch unit.kind {
+		case vm2Exec:
+			last := &source.instructions[unit.first+unit.count-1]
+			if last.next < 0 || last.next >= len(p.sourceToUnit) {
+				return nil, fmt.Errorf("v3 execution unit has invalid target %d", last.next)
+			}
+			unit.next = p.sourceToUnit[last.next]
+		case vm2Jump, vm2Branch:
+			term := &source.instructions[unit.term]
+			unit.control = term.control
+			for edgeIndex, edge := range term.edges {
+				if edge.target < 0 || edge.target >= len(p.sourceToUnit) {
+					return nil, fmt.Errorf("v3 edge has invalid target %d", edge.target)
+				}
+				unit.edges[edgeIndex] = vm2Edge{target: p.sourceToUnit[edge.target], moves: edge.moves}
+				if unit.kind == vm2Jump {
+					break
+				}
+			}
+		case vm2Return:
+			term := &source.instructions[unit.term]
+			unit.returnReg = term.returnReg
+			unit.resultType = term.resultType
+		default:
+			return nil, fmt.Errorf("invalid v3 unit kind %d", unit.kind)
+		}
+	}
+	p.buckets = vm3BucketCount(len(p.units))
+	p.fused = len(source.instructions) - len(p.units)
+	return p, nil
+}
+
+type vm3DispatchKind uint8
+
+const (
+	vm3InitialEdge vm3DispatchKind = iota
+	vm3ExecEdge
+	vm3MoveEdge
+	vm3InvalidEdge
+)
+
+type vm3DispatchInfo struct {
+	kind         vm3DispatchKind
+	unit         *vm3Unit
+	computeBlock *Block
+	moves        []vm2Move
+	next         int
+}
+
+func vm3EncodedConstant(b *Block, pos src.XPos, value uint64, rng *protectionRNG, encrypt bool, zero *Value) *Value {
 	if !encrypt {
 		return b.NewValue0I(pos, OpConst64, b.Func.Config.Types.UInt64, int64(value))
 	}
@@ -1191,19 +1356,22 @@ func vm2StateConstant(b *Block, source *Value, pos src.XPos, value uint64, rng *
 	}
 	encoded := b.NewValue0I(pos, OpConst64, b.Func.Config.Types.UInt64, int64(value^mask))
 	key := b.NewValue0I(pos, OpConst64, b.Func.Config.Types.UInt64, int64(mask))
-	if source == nil {
+	if zero == nil {
 		return b.NewValue2(pos, OpXor64, b.Func.Config.Types.UInt64, encoded, key)
 	}
-	zero := opaqueZero64(b, source)
 	dynamicKey := b.NewValue2(pos, OpXor64, b.Func.Config.Types.UInt64, key, zero)
 	return b.NewValue2(pos, OpXor64, b.Func.Config.Types.UInt64, encoded, dynamicKey)
 }
 
-func vm2ValueConstant(b *Block, source *Value, pos src.XPos, value uint64, rng *protectionRNG, encrypt bool) *Value {
-	return vm2StateConstant(b, source, pos, value, rng, encrypt)
+func vm3MaskedState(b *Block, pos src.XPos, state, mask uint64, dynamicMask *Value) *Value {
+	if dynamicMask == nil {
+		return b.NewValue0I(pos, OpConst64, b.Func.Config.Types.UInt64, int64(state))
+	}
+	encoded := b.NewValue0I(pos, OpConst64, b.Func.Config.Types.UInt64, int64(state^mask))
+	return b.NewValue2(pos, OpXor64, b.Func.Config.Types.UInt64, encoded, dynamicMask)
 }
 
-func vm2EmitValue(b *Block, inst *vm2Instruction, regs []*Value, pc *Value, rng *protectionRNG, encrypt bool) (*Value, error) {
+func vm2EmitValue(b *Block, inst *vm2Instruction, regs []*Value, pc, zero *Value, rng *protectionRNG, encrypt bool) (*Value, error) {
 	v := inst.value
 	t := v.Type
 	arg := func(i int) (*Value, error) {
@@ -1214,7 +1382,7 @@ func vm2EmitValue(b *Block, inst *vm2Instruction, regs []*Value, pc *Value, rng 
 	}
 	switch v.Op {
 	case OpConst64:
-		return vm2ValueConstant(b, pc, v.Pos, inst.imm, rng, encrypt), nil
+		return vm3EncodedConstant(b, v.Pos, inst.imm, rng, encrypt, zero), nil
 	case OpConstBool:
 		return b.NewValue0I(v.Pos, OpConstBool, t, v.AuxInt), nil
 	case OpCopy:
@@ -1295,10 +1463,61 @@ func vm2CheckPermutation(n int, rng *protectionRNG) []int {
 	return order
 }
 
-func installVM2Program(f *Func, p *vm2Program, encrypt bool) error {
-	if len(p.instructions) == 0 || p.initMem == nil || p.sourceArg == nil {
-		return fmt.Errorf("invalid v2 VM program")
+type vm3CheckSpec struct {
+	state uint64
+	unit  int
+	decoy bool
+}
+
+type vm3CheckNode struct {
+	block *Block
+	spec  vm3CheckSpec
+}
+
+func vm3StateForBucket(rng *protectionRNG, seen map[uint64]bool, bucketKey, bucketMask uint64, bucket int) uint64 {
+	low := (uint64(bucket) ^ bucketKey) & bucketMask
+	for {
+		state := (rng.next() &^ bucketMask) | low
+		if state != 0 && !seen[state] {
+			seen[state] = true
+			return state
+		}
 	}
+}
+
+func vm3ShuffleChecks(checks []vm3CheckSpec, rng *protectionRNG) {
+	for i := len(checks) - 1; i > 0; i-- {
+		j := int(rng.next() % uint64(i+1))
+		checks[i], checks[j] = checks[j], checks[i]
+	}
+}
+
+func vm3EmitUnit(b *Block, p *vm3Program, unit *vm3Unit, regs []*Value, pc, zero *Value, rng *protectionRNG, encrypt bool) ([]*Value, error) {
+	if unit.count <= 0 {
+		return nil, fmt.Errorf("invalid v3 execution unit")
+	}
+	local := append([]*Value(nil), regs...)
+	changed := make([]*Value, len(regs))
+	for i := 0; i < unit.count; i++ {
+		inst := &p.source.instructions[unit.first+i]
+		if inst.kind != vm2Exec {
+			return nil, fmt.Errorf("v3 execution unit crosses a terminator")
+		}
+		value, err := vm2EmitValue(b, inst, local, pc, zero, rng, encrypt)
+		if err != nil {
+			return nil, err
+		}
+		local[inst.dst] = value
+		changed[inst.dst] = value
+	}
+	return changed, nil
+}
+
+func installVM3Program(f *Func, p *vm3Program, encrypt bool) error {
+	if p == nil || p.source == nil || len(p.units) == 0 || p.source.initMem == nil || p.source.sourceArg == nil || p.buckets <= 0 {
+		return fmt.Errorf("invalid v3 VM program")
+	}
+	source := p.source
 	entry := f.Entry
 	for len(entry.Succs) != 0 {
 		entry.removeEdge(0)
@@ -1306,144 +1525,202 @@ func installVM2Program(f *Func, p *vm2Program, encrypt bool) error {
 	entry.Reset(BlockPlain)
 	entry.Likely = BranchUnknown
 
-	rng := newProtectionRNG(f)
-	states := make([]uint64, len(p.instructions)+1)
-	seen := make(map[uint64]bool, len(states))
-	for i := range states {
-		for {
-			s := rng.next()
-			if s != 0 && !seen[s] {
-				states[i] = s
-				seen[s] = true
-				break
-			}
+	rng := newProtectionRNGDomain(f, "vm3-state")
+	bucketMask := uint64(p.buckets - 1)
+	bucketKey := rng.next()
+	stateMasks := make([]uint64, p.buckets)
+	for bucket := range stateMasks {
+		stateMasks[bucket] = rng.next()
+		if stateMasks[bucket] == 0 {
+			stateMasks[bucket] = 0x9e3779b97f4a7c15 ^ uint64(bucket)
 		}
 	}
-	invalidState := states[len(states)-1]
-	checkOrder := vm2CheckPermutation(len(p.instructions), rng)
-	decoyCount := (len(p.instructions) + 1) / 2
-	if decoyCount > 128 {
-		decoyCount = 128
+	seen := make(map[uint64]bool, len(p.units)*2+1)
+	states := make([]uint64, len(p.units))
+	unitBuckets := make([]int, len(p.units))
+	checksByBucket := make([][]vm3CheckSpec, p.buckets)
+	stateOrder := vm2CheckPermutation(len(p.units), rng)
+	for rank, unitIndex := range stateOrder {
+		bucket := rank % p.buckets
+		state := vm3StateForBucket(rng, seen, bucketKey, bucketMask, bucket)
+		states[unitIndex] = state
+		unitBuckets[unitIndex] = bucket
+		checksByBucket[bucket] = append(checksByBucket[bucket], vm3CheckSpec{state: state, unit: unitIndex})
 	}
-	decoyStates := make([]uint64, decoyCount)
-	for i := range decoyStates {
-		for {
-			state := rng.next()
-			if state != 0 && !seen[state] {
-				decoyStates[i] = state
-				seen[state] = true
-				break
-			}
+
+	decoyCount := (len(p.units) + 2) / 3
+	if len(p.units) >= 4 && decoyCount < p.buckets {
+		decoyCount = p.buckets
+	}
+	if decoyCount > 96 {
+		decoyCount = 96
+	}
+	decoyOffset := int(rng.next() % uint64(p.buckets))
+	for i := 0; i < decoyCount; i++ {
+		bucket := (i + decoyOffset) % p.buckets
+		state := vm3StateForBucket(rng, seen, bucketKey, bucketMask, bucket)
+		checksByBucket[bucket] = append(checksByBucket[bucket], vm3CheckSpec{state: state, unit: -1, decoy: true})
+	}
+	invalidState := vm3StateForBucket(rng, seen, bucketKey, bucketMask, 0)
+	for bucket := range checksByBucket {
+		vm3ShuffleChecks(checksByBucket[bucket], rng)
+		if len(checksByBucket[bucket]) == 0 {
+			return fmt.Errorf("v3 bucket %d has no checks", bucket)
 		}
 	}
-	p.checks = len(p.instructions) + decoyCount
+	p.checks = len(p.units) + decoyCount
 	p.decoys = decoyCount
 
 	dispatch := f.NewBlock(BlockPlain)
-	checks := make([]*Block, len(p.instructions))
-	handlers := make([]*Block, len(p.instructions))
-	for i, inst := range p.instructions {
-		checks[i] = f.NewBlock(BlockIf)
+	dispatch.Pos = entry.Pos
+	handlers := make([]*Block, len(p.units))
+	for i, unit := range p.units {
 		handlers[i] = f.NewBlock(BlockPlain)
-		checks[i].Pos = inst.pos
-		handlers[i].Pos = inst.pos
-	}
-	decoys := make([]*Block, decoyCount)
-	for i := range decoys {
-		decoys[i] = f.NewBlock(BlockIf)
-		decoys[i].Pos = entry.Pos
+		handlers[i].Pos = unit.pos
 	}
 	invalid := f.NewBlock(BlockPlain)
-	dispatch.Pos = entry.Pos
 	invalid.Pos = entry.Pos
+	selectors := make([]*Block, p.buckets-1)
+	for i := range selectors {
+		selectors[i] = f.NewBlock(BlockIf)
+		selectors[i].Pos = entry.Pos
+	}
+
+	checkNodes := make([][]vm3CheckNode, p.buckets)
+	bucketHeads := make([]*Block, p.buckets)
+	for bucket, specs := range checksByBucket {
+		checkNodes[bucket] = make([]vm3CheckNode, len(specs))
+		for i, spec := range specs {
+			block := f.NewBlock(BlockIf)
+			block.Pos = entry.Pos
+			if !spec.decoy {
+				block.Pos = p.units[spec.unit].pos
+			}
+			checkNodes[bucket][i] = vm3CheckNode{block: block, spec: spec}
+		}
+		bucketHeads[bucket] = checkNodes[bucket][0].block
+	}
 
 	entry.AddEdgeTo(dispatch)
-	checkChain := make([]*Block, 0, len(checks)+len(decoys))
-	for _, index := range checkOrder {
-		checkChain = append(checkChain, checks[index])
+	bucketOrder := vm2CheckPermutation(p.buckets, rng)
+	if len(selectors) == 0 {
+		dispatch.AddEdgeTo(bucketHeads[0])
+	} else {
+		dispatch.AddEdgeTo(selectors[0])
+		for i, selector := range selectors {
+			selector.AddEdgeTo(bucketHeads[bucketOrder[i]])
+			if i+1 < len(selectors) {
+				selector.AddEdgeTo(selectors[i+1])
+			} else {
+				selector.AddEdgeTo(bucketHeads[bucketOrder[len(bucketOrder)-1]])
+			}
+		}
 	}
-	checkChain = append(checkChain, decoys...)
-	dispatch.AddEdgeTo(checkChain[0])
-	infos := make(map[*Block]vm2DispatchInfo, len(p.instructions)*2+2)
-	infos[entry] = vm2DispatchInfo{kind: vm2InitialEdge, next: 0}
-	for i, inst := range p.instructions {
-		checks[i].AddEdgeTo(handlers[i])
-		switch inst.kind {
+
+	infos := make(map[*Block]vm3DispatchInfo, len(p.units)*2+2)
+	infos[entry] = vm3DispatchInfo{kind: vm3InitialEdge, next: 0}
+	for i := range p.units {
+		unit := &p.units[i]
+		switch unit.kind {
 		case vm2Exec:
 			handlers[i].AddEdgeTo(dispatch)
-			infos[handlers[i]] = vm2DispatchInfo{kind: vm2ExecEdge, inst: &p.instructions[i], next: inst.next}
+			infos[handlers[i]] = vm3DispatchInfo{kind: vm3ExecEdge, unit: unit, computeBlock: handlers[i], next: unit.next}
 		case vm2Jump:
 			handlers[i].AddEdgeTo(dispatch)
-			infos[handlers[i]] = vm2DispatchInfo{kind: vm2MoveEdge, moves: inst.edges[0].moves, next: inst.edges[0].target}
+			infos[handlers[i]] = vm3DispatchInfo{kind: vm3MoveEdge, unit: unit, computeBlock: handlers[i], moves: unit.edges[0].moves, next: unit.edges[0].target}
 		case vm2Branch:
 			thenBlock := f.NewBlock(BlockPlain)
 			elseBlock := f.NewBlock(BlockPlain)
-			thenBlock.Pos = inst.pos
-			elseBlock.Pos = inst.pos
+			thenBlock.Pos = unit.pos
+			elseBlock.Pos = unit.pos
 			handlers[i].AddEdgeTo(thenBlock)
 			handlers[i].AddEdgeTo(elseBlock)
 			thenBlock.AddEdgeTo(dispatch)
 			elseBlock.AddEdgeTo(dispatch)
-			infos[thenBlock] = vm2DispatchInfo{kind: vm2MoveEdge, moves: inst.edges[0].moves, next: inst.edges[0].target}
-			infos[elseBlock] = vm2DispatchInfo{kind: vm2MoveEdge, moves: inst.edges[1].moves, next: inst.edges[1].target}
+			infos[thenBlock] = vm3DispatchInfo{kind: vm3MoveEdge, unit: unit, computeBlock: handlers[i], moves: unit.edges[0].moves, next: unit.edges[0].target}
+			infos[elseBlock] = vm3DispatchInfo{kind: vm3MoveEdge, unit: unit, computeBlock: handlers[i], moves: unit.edges[1].moves, next: unit.edges[1].target}
 		case vm2Return:
-			// The handler is converted to BlockRet after the dispatcher Phis
-			// have been created below.
+			// The handler becomes BlockRet after dispatcher Phis are complete.
 		default:
-			return fmt.Errorf("invalid v2 instruction kind %d", inst.kind)
+			return fmt.Errorf("invalid v3 unit kind %d", unit.kind)
 		}
 	}
-	for i, decoy := range decoys {
-		decoy.AddEdgeTo(invalid)
-		_ = i
-	}
-	for i, check := range checkChain {
-		if i+1 < len(checkChain) {
-			check.AddEdgeTo(checkChain[i+1])
-		} else {
-			check.AddEdgeTo(invalid)
+	for bucket := range checkNodes {
+		for i := range checkNodes[bucket] {
+			node := &checkNodes[bucket][i]
+			if node.spec.decoy {
+				node.block.AddEdgeTo(invalid)
+			} else {
+				node.block.AddEdgeTo(handlers[node.spec.unit])
+			}
+			if i+1 < len(checkNodes[bucket]) {
+				node.block.AddEdgeTo(checkNodes[bucket][i+1].block)
+			} else {
+				node.block.AddEdgeTo(invalid)
+			}
 		}
 	}
 	invalid.AddEdgeTo(dispatch)
-	infos[invalid] = vm2DispatchInfo{kind: vm2InvalidEdge, next: -1}
+	infos[invalid] = vm3DispatchInfo{kind: vm3InvalidEdge, next: -1}
 
 	uint64Type := f.Config.Types.UInt64
 	pc := dispatch.NewValue0(entry.Pos, OpPhi, uint64Type)
-	registers := make([]*Value, len(p.registers))
-	for i, v := range p.registers {
+	registers := make([]*Value, len(source.registers))
+	for i, v := range source.registers {
 		registers[i] = dispatch.NewValue0(v.Pos, OpPhi, v.Type)
 	}
 	zero64 := entry.NewValue0I(entry.Pos, OpConst64, uint64Type, 0)
 	zeroBool := entry.NewValue0I(entry.Pos, OpConstBool, f.Config.Types.Bool, 0)
+	var entryOpaqueZero, dispatchOpaqueZero *Value
+	var entryDynamicMask *Value
+	dispatchDynamicMasks := make([]*Value, p.buckets)
+	if encrypt {
+		entryOpaqueZero = opaqueZero64(entry, source.sourceArg)
+		dispatchOpaqueZero = opaqueZero64(dispatch, pc)
+		entryMask := entry.NewValue0I(entry.Pos, OpConst64, uint64Type, int64(stateMasks[unitBuckets[0]]))
+		entryDynamicMask = entry.NewValue2(entry.Pos, OpXor64, uint64Type, entryMask, entryOpaqueZero)
+		for bucket := range dispatchDynamicMasks {
+			mask := dispatch.NewValue0I(entry.Pos, OpConst64, uint64Type, int64(stateMasks[bucket]))
+			dispatchDynamicMasks[bucket] = dispatch.NewValue2(entry.Pos, OpXor64, uint64Type, mask, dispatchOpaqueZero)
+		}
+	}
 
 	// Every edge into dispatch contributes one state and a complete register
-	// snapshot.  Unchanged registers deliberately use their dispatcher Phi as
-	// the argument; this preserves the old iteration's value across loops.
+	// snapshot. A fused execution unit computes against a local register view,
+	// then publishes all changed registers through the dispatcher Phis once.
+	computedByBlock := make(map[*Block][]*Value)
 	for _, edge := range dispatch.Preds {
 		info, ok := infos[edge.b]
 		if !ok {
-			return fmt.Errorf("missing dispatcher metadata for %v", edge.b)
+			return fmt.Errorf("missing v3 dispatcher metadata for %v", edge.b)
 		}
 		var state *Value
 		switch info.kind {
-		case vm2InitialEdge:
-			state = vm2StateConstant(entry, p.sourceArg, entry.Pos, states[0], rng, encrypt)
-		case vm2InvalidEdge:
-			state = vm2StateConstant(edge.b, pc, edge.b.Pos, invalidState, rng, encrypt)
+		case vm3InitialEdge:
+			state = vm3MaskedState(entry, entry.Pos, states[0], stateMasks[unitBuckets[0]], entryDynamicMask)
+		case vm3InvalidEdge:
+			state = vm3MaskedState(edge.b, edge.b.Pos, invalidState, stateMasks[0], dispatchDynamicMasks[0])
 		default:
-			if info.next < 0 || info.next >= len(states)-1 {
-				return fmt.Errorf("invalid dispatcher target %d", info.next)
+			if info.next < 0 || info.next >= len(states) {
+				return fmt.Errorf("invalid v3 dispatcher target %d", info.next)
 			}
-			state = vm2StateConstant(edge.b, pc, edge.b.Pos, states[info.next], rng, encrypt)
+			state = vm3MaskedState(edge.b, edge.b.Pos, states[info.next], stateMasks[unitBuckets[info.next]], dispatchDynamicMasks[unitBuckets[info.next]])
 		}
 		pc.AddArg(state)
 
-		var computed *Value
-		if info.kind == vm2ExecEdge {
-			var err error
-			computed, err = vm2EmitValue(edge.b, info.inst, registers, pc, rng, encrypt)
-			if err != nil {
-				return err
+		var computed []*Value
+		if info.unit != nil && info.unit.count > 0 {
+			computed = computedByBlock[info.computeBlock]
+			if computed != nil {
+				// The same handler can feed both branch edges. Reuse the values
+				// emitted in that handler instead of duplicating the computation.
+			} else {
+				var err error
+				computed, err = vm3EmitUnit(info.computeBlock, p, info.unit, registers, pc, dispatchOpaqueZero, rng, encrypt)
+				if err != nil {
+					return err
+				}
+				computedByBlock[info.computeBlock] = computed
 			}
 		}
 		moveByDst := make(map[int]int, len(info.moves))
@@ -1452,51 +1729,82 @@ func installVM2Program(f *Func, p *vm2Program, encrypt bool) error {
 		}
 		for i, phi := range registers {
 			var value *Value
-			switch {
-			case info.kind == vm2InitialEdge:
-				value = vm2InitialRegisterValue(entry, p.registers[i], zero64, zeroBool)
-			case info.kind == vm2ExecEdge && i == info.inst.dst:
-				value = computed
-			default:
-				if srcReg, ok := moveByDst[i]; ok {
-					value = registers[srcReg]
-				} else {
-					value = phi
-				}
+			if info.kind == vm3InitialEdge {
+				value = vm2InitialRegisterValue(entry, source.registers[i], zero64, zeroBool)
+			} else if srcReg, ok := moveByDst[i]; ok {
+				value = registers[srcReg]
+			} else if computed != nil && computed[i] != nil {
+				value = computed[i]
+			} else {
+				value = phi
 			}
 			phi.AddArg(value)
 		}
 	}
 
-	for i, check := range checks {
-		pos := p.instructions[i].pos
-		state := vm2StateConstant(check, pc, pos, states[i], rng, encrypt)
-		match := check.NewValue2(pos, OpEq64, f.Config.Types.Bool, pc, state)
-		check.SetControl(match)
-		check.Likely = BranchLikely
+	if len(selectors) != 0 {
+		key := vm3EncodedConstant(dispatch, entry.Pos, bucketKey, rng, encrypt, dispatchOpaqueZero)
+		mixed := dispatch.NewValue2(entry.Pos, OpXor64, uint64Type, pc, key)
+		mask := vm3EncodedConstant(dispatch, entry.Pos, bucketMask, rng, encrypt, dispatchOpaqueZero)
+		bucketValue := dispatch.NewValue2(entry.Pos, OpAnd64, uint64Type, mixed, mask)
+		for i, selector := range selectors {
+			bucket := bucketOrder[i]
+			expected := vm3EncodedConstant(selector, selector.Pos, uint64(bucket), rng, encrypt, dispatchOpaqueZero)
+			match := selector.NewValue2(selector.Pos, OpEq64, f.Config.Types.Bool, bucketValue, expected)
+			selector.SetControl(match)
+			selector.Likely = BranchUnknown
+		}
 	}
-	for i, decoy := range decoys {
-		state := vm2StateConstant(decoy, pc, decoy.Pos, decoyStates[i], rng, encrypt)
-		match := decoy.NewValue2(decoy.Pos, OpEq64, f.Config.Types.Bool, pc, state)
-		decoy.SetControl(match)
-		decoy.Likely = BranchUnlikely
+	for bucket := range checkNodes {
+		for i := range checkNodes[bucket] {
+			node := &checkNodes[bucket][i]
+			state := vm3MaskedState(node.block, node.block.Pos, node.spec.state, stateMasks[bucket], dispatchDynamicMasks[bucket])
+			match := node.block.NewValue2(node.block.Pos, OpEq64, f.Config.Types.Bool, pc, state)
+			node.block.SetControl(match)
+			if node.spec.decoy {
+				node.block.Likely = BranchUnlikely
+			} else {
+				node.block.Likely = BranchUnknown
+			}
+		}
 	}
-	for i, inst := range p.instructions {
-		switch inst.kind {
+	for i := range p.units {
+		unit := &p.units[i]
+		var computed []*Value
+		if unit.count > 0 {
+			computed = computedByBlock[handlers[i]]
+			if computed == nil {
+				var err error
+				computed, err = vm3EmitUnit(handlers[i], p, unit, registers, pc, dispatchOpaqueZero, rng, encrypt)
+				if err != nil {
+					return err
+				}
+				computedByBlock[handlers[i]] = computed
+			}
+		}
+		switch unit.kind {
 		case vm2Branch:
 			handlers[i].Reset(BlockIf)
-			handlers[i].SetControl(registers[inst.control])
+			control := registers[unit.control]
+			if computed != nil && computed[unit.control] != nil {
+				control = computed[unit.control]
+			}
+			handlers[i].SetControl(control)
 			handlers[i].Likely = BranchUnknown
 		case vm2Return:
 			handlers[i].Reset(BlockRet)
-			result := handlers[i].NewValue0(inst.pos, OpMakeResult, inst.resultType)
-			result.AddArg(registers[inst.returnReg])
-			result.AddArg(p.initMem)
+			result := handlers[i].NewValue0(unit.pos, OpMakeResult, unit.resultType)
+			returnValue := registers[unit.returnReg]
+			if computed != nil && computed[unit.returnReg] != nil {
+				returnValue = computed[unit.returnReg]
+			}
+			result.AddArg(returnValue)
+			result.AddArg(source.initMem)
 			handlers[i].SetControl(result)
 		}
 	}
 
-	// The old CFG is now unreachable from the original entry.  Running the
+	// The old CFG is now unreachable from the original entry. Running the
 	// normal dead-code pass here releases its values and blocks before lower.
 	deadcode(f)
 	return nil

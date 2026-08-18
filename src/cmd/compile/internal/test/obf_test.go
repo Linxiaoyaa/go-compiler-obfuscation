@@ -56,6 +56,11 @@ func protectedVMBool(a, b uint64) bool {
 	return a < b || a == 0x4242424242424242
 }
 
+//go:vm
+func protectedVMPlain(a, b uint64) uint64 {
+	return (a ^ 0x0a0b0c0d0e0f1011) + b
+}
+
 //go:encrypt
 func protectedStringLiteral() string {
 	return "obf-runtime-string-v1-secret"
@@ -137,6 +142,10 @@ func TestProtectionDirectives(t *testing.T) {
 		boolWant := a < b || a == 0x4242424242424242
 		if got := protectedVMBool(a, b); got != boolWant {
 			t.Fatalf("protectedVMBool(%#x, %#x) = %t; want %t", a, b, got, boolWant)
+		}
+		plainWant := (a ^ 0x0a0b0c0d0e0f1011) + b
+		if got := protectedVMPlain(a, b); got != plainWant {
+			t.Fatalf("protectedVMPlain(%#x, %#x) = %#x; want %#x", a, b, got, plainWant)
 		}
 	}
 	if got := protectedStringLiteral(); len(got) != 28 || got[0] != 'o' || got[27] != 't' {

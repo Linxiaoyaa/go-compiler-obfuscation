@@ -73,7 +73,9 @@ try {
     Write-Host "pattern:  $Pattern"
     Write-Host "seed:     $Seed"
     Write-Host "cache:    $Cache"
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     & $go @args
+    $stopwatch.Stop()
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -83,6 +85,7 @@ try {
     Write-Host "output:   $($artifact.FullName)"
     Write-Host "size:     $($artifact.Length)"
     Write-Host "sha256:   $($hash.Hash)"
+    Write-Host ("elapsed:  {0:N3}s" -f $stopwatch.Elapsed.TotalSeconds)
 } finally {
     $env:GOROOT = $oldGOROOT
     $env:GOCACHE = $oldGOCACHE
