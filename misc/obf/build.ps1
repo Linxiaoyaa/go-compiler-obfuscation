@@ -8,10 +8,40 @@ param(
     [string]$Pattern = "",
     [string]$Seed = "",
     [string]$Cache = "",
+    [string[]]$ScanPlaintext = @(),
     [switch]$KeepSymbols
 )
 
 $ErrorActionPreference = "Stop"
+
+function Find-ByteSequence {
+    param(
+        [byte[]]$Data,
+        [byte[]]$Needle
+    )
+
+    if ($Needle.Length -eq 0) {
+        return -1
+    }
+    $limit = $Data.Length - $Needle.Length
+    for ($i = 0; $i -le $limit; $i++) {
+        if ($Data[$i] -ne $Needle[0]) {
+            continue
+        }
+        $match = $true
+        for ($j = 1; $j -lt $Needle.Length; $j++) {
+            if ($Data[$i + $j] -ne $Needle[$j]) {
+                $match = $false
+                break
+            }
+        }
+        if ($match) {
+            return $i
+        }
+    }
+    return -1
+}
+
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $go = Join-Path $root "bin\go.exe"
 if (-not (Test-Path -LiteralPath $go)) {
@@ -33,7 +63,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 }
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v3"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v4"
 }
 $Cache = [System.IO.Path]::GetFullPath($Cache)
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -82,6 +112,20 @@ try {
 
     $artifact = Get-Item -LiteralPath $outPath
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $outPath
+    if ($ScanPlaintext.Count -gt 0) {
+        $artifactBytes = [System.IO.File]::ReadAllBytes($outPath)
+        foreach ($literal in $ScanPlaintext) {
+            if ([string]::IsNullOrEmpty($literal)) {
+                throw "ScanPlaintext entries must be non-empty"
+            }
+            $needle = [System.Text.Encoding]::UTF8.GetBytes($literal)
+            $offset = Find-ByteSequence -Data $artifactBytes -Needle $needle
+            if ($offset -ge 0) {
+                throw "Plaintext scan matched at file offset $offset"
+            }
+        }
+        Write-Host "scan:     $($ScanPlaintext.Count) plaintext value(s) absent"
+    }
     Write-Host "output:   $($artifact.FullName)"
     Write-Host "size:     $($artifact.Length)"
     Write-Host "sha256:   $($hash.Hash)"

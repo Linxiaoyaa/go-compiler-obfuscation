@@ -3760,22 +3760,39 @@ func (s *state) exprCheckPtr(n ir.Node, checkPtrOK bool) *ssa.Value {
 	}
 }
 
-// obfuscatedStringLiteral lowers a protected literal to a runtime decode call.
-// The call returns the final byte pointer and length, so the caller constructs
-// the string header without creating a second temporary plaintext buffer.
+// obfuscatedStringLiteral lowers a protected literal to a String v2 runtime
+// decode call. The call returns the final byte pointer and length, so the
+// caller constructs the string header without creating a second plaintext
+// buffer.
 func (s *state) obfuscatedStringLiteral(t *types.Type, text string) *ssa.Value {
 	sym, key := staticdata.ObfuscatedStringSym(
 		s.curfn.Pos(), ir.FuncName(s.curfn), base.Debug.ObfSeed, text)
 	ptr := s.entryNewValue1A(ssa.OpAddr, s.config.Types.BytePtr, sym, s.sb)
 	length := s.constInt(types.Types[types.TINT], int64(len(text)))
-	keyValue := s.newValue0I(ssa.OpConst64, s.config.Types.UInt64, int64(key))
+	keys := make([]*ssa.Value, len(key.Lanes))
+	for i, lane := range key.Lanes {
+		keys[i] = s.newValue0I(ssa.OpConst64, s.config.Types.UInt64, int64(lane))
+	}
 	results := s.rtcall(
-		typecheck.LookupRuntimeFunc("obfStringData"),
+		typecheck.LookupRuntimeFunc(obfuscatedStringRuntimeName(key.Decoder)),
 		true,
 		[]*types.Type{s.config.Types.BytePtr, types.Types[types.TINT]},
-		ptr, length, keyValue,
+		ptr, length, keys[0], keys[1], keys[2], keys[3],
 	)
 	return s.newValue2(ssa.OpStringMake, t, results[0], results[1])
+}
+
+func obfuscatedStringRuntimeName(decoder uint8) string {
+	switch decoder & 3 {
+	case 0:
+		return "obfStringDataV2A"
+	case 1:
+		return "obfStringDataV2B"
+	case 2:
+		return "obfStringDataV2C"
+	default:
+		return "obfStringDataV2D"
+	}
 }
 
 func (s *state) resultOfCall(c *ssa.Value, which int64, t *types.Type) *ssa.Value {
@@ -8033,8 +8050,8 @@ func (e *ssafn) Syslook(name string) *obj.LSym {
 		return ir.Syms.CgoCheckMemmove
 	case "cgoCheckPtrWrite":
 		return ir.Syms.CgoCheckPtrWrite
-	case "obfStringData":
-		return typecheck.LookupRuntimeFunc("obfStringData")
+	case "obfStringDataV2A", "obfStringDataV2B", "obfStringDataV2C", "obfStringDataV2D":
+		return typecheck.LookupRuntimeFunc(name)
 	}
 	e.Fatalf(src.NoXPos, "unknown Syslook func %v", name)
 	return nil

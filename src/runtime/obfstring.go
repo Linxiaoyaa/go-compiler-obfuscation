@@ -6,26 +6,115 @@ package runtime
 
 import "unsafe"
 
-// obfStringData decodes an encrypted literal directly into its final
-// heap-backed byte storage. It returns the data pointer and length separately
-// so the compiler can construct a string header without a second copy.
-//
+// String v2 uses separate decoder bodies selected from the function/literal
+// domain. There is no shared plaintext-producing implementation that covers
+// every protected literal in the process.
+
+type obfStringKeyV2 [4]uint64
+
 //go:noinline
-func obfStringData(src *byte, n int, key uint64) (*byte, int) {
+func obfStringDataV2A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
 	if n <= 0 {
 		return nil, 0
 	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
 	p := mallocgc(uintptr(n), nil, false)
 	dst := unsafe.Slice((*byte)(p), n)
 	srcp := unsafe.Pointer(src)
 	for i := 0; i < n; i++ {
-		x := key + uint64(i)*0x9e3779b97f4a7c15
-		x ^= x >> 30
-		x *= 0xbf58476d1ce4e5b9
-		x ^= x >> 27
-		x *= 0x94d049bb133111eb
-		x ^= x >> 31
-		dst[i] = *(*byte)(add(srcp, uintptr(i))) ^ byte(x>>uint((i&7)*8))
+		index := uint64(i)
+		x := key[0] + index*0x9e3779b97f4a7c15
+		x ^= rotateObf64(key[1]^index, uint(index&63))
+		x += key[2] ^ (key[3] + index*0xd1b54a32d192ed03)
+		x = mixObfStringV2(x)
+		dst[i] = *(*byte)(add(srcp, uintptr(i))) ^ byte(x>>uint((index&7)*8))
 	}
+	obfStringWipeV2(&key)
 	return (*byte)(p), n
+}
+
+//go:noinline
+func obfStringDataV2B(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	p := mallocgc(uintptr(n), nil, false)
+	dst := unsafe.Slice((*byte)(p), n)
+	srcp := unsafe.Pointer(src)
+	for i := 0; i < n; i++ {
+		index := uint64(i)
+		x := key[1] + index*0xd1b54a32d192ed03
+		x ^= rotateObf64(key[2]+index, uint((index+17)&63))
+		x += key[3] ^ (key[0] + index*0x9e3779b97f4a7c15)
+		x = mixObfStringV2(x)
+		dst[i] = *(*byte)(add(srcp, uintptr(i))) ^ byte(x>>uint((index&7)*8))
+	}
+	obfStringWipeV2(&key)
+	return (*byte)(p), n
+}
+
+//go:noinline
+func obfStringDataV2C(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	p := mallocgc(uintptr(n), nil, false)
+	dst := unsafe.Slice((*byte)(p), n)
+	srcp := unsafe.Pointer(src)
+	for i := 0; i < n; i++ {
+		index := uint64(i)
+		x := key[2] + index*0x94d049bb133111eb
+		x ^= rotateObf64(key[3]^index, uint((index+31)&63))
+		x += key[0] ^ (key[1] + index*0xbf58476d1ce4e5b9)
+		x = mixObfStringV2(x)
+		dst[i] = *(*byte)(add(srcp, uintptr(i))) ^ byte(x>>uint((index&7)*8))
+	}
+	obfStringWipeV2(&key)
+	return (*byte)(p), n
+}
+
+//go:noinline
+func obfStringDataV2D(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	p := mallocgc(uintptr(n), nil, false)
+	dst := unsafe.Slice((*byte)(p), n)
+	srcp := unsafe.Pointer(src)
+	for i := 0; i < n; i++ {
+		index := uint64(i)
+		x := key[3] + index*0xbf58476d1ce4e5b9
+		x ^= rotateObf64(key[0]+index, uint((index+47)&63))
+		x += key[1] ^ (key[2] + index*0x94d049bb133111eb)
+		x = mixObfStringV2(x)
+		dst[i] = *(*byte)(add(srcp, uintptr(i))) ^ byte(x>>uint((index&7)*8))
+	}
+	obfStringWipeV2(&key)
+	return (*byte)(p), n
+}
+
+func mixObfStringV2(x uint64) uint64 {
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return x
+}
+
+func rotateObf64(x uint64, n uint) uint64 {
+	if n == 0 {
+		return x
+	}
+	return x<<n | x>>(64-n)
+}
+
+//go:noinline
+func obfStringWipeV2(key *obfStringKeyV2) {
+	for i := range key {
+		key[i] = 0
+	}
 }

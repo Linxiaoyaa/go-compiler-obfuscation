@@ -225,7 +225,7 @@ func obfHarden(f *Func) {
 			}
 		}
 		if stringProtected {
-			applied = append(applied, "encrypt=str-runtime-v1")
+			applied = append(applied, "encrypt=str-runtime-v2")
 		}
 	}
 	if flags&ir.ProtectObfuscate != 0 {
@@ -248,7 +248,7 @@ func hasObfuscatedStringCall(f *Func) bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfStringData") {
+			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") {
 				return true
 			}
 		}
@@ -267,7 +267,7 @@ func obfuscatedStringKeyConstants(f *Func) map[*Value]bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if !ok || aux.Fn == nil || !strings.Contains(aux.Fn.Name, "runtime.obfStringData") {
+			if !ok || aux.Fn == nil || !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") {
 				continue
 			}
 			for _, arg := range v.Args {

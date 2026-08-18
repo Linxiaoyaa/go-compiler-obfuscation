@@ -70,13 +70,13 @@ func walkExpr(n ir.Node, init *ir.Nodes) ir.Node {
 		// Protected literals use a dedicated encrypted backing symbol. Emit it
 		// during walk so the concurrent SSA backend only looks up an existing
 		// symbol and never creates plaintext rodata for the marked function.
-		if ir.CurFunc != nil && ir.CurFunc.Protection&ir.ProtectEncrypt != 0 {
-			_, _ = staticdata.ObfuscatedStringSym(
-				n.Pos(), ir.FuncName(ir.CurFunc), base.Debug.ObfSeed, constant.StringVal(n.Val()))
+		text := constant.StringVal(n.Val())
+		if text != "" && ir.CurFunc != nil && ir.CurFunc.Protection&ir.ProtectEncrypt != 0 {
+			_, _ = staticdata.ObfuscatedStringSym(n.Pos(), ir.FuncName(ir.CurFunc), base.Debug.ObfSeed, text)
 		} else {
 			// Emit string symbol now to avoid emitting any concurrently during the
 			// backend.
-			_ = staticdata.StringSym(n.Pos(), constant.StringVal(n.Val()))
+			_ = staticdata.StringSym(n.Pos(), text)
 		}
 	}
 

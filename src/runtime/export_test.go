@@ -16,6 +16,27 @@ import (
 	"unsafe"
 )
 
+// ObfStringDataV2ForTest exposes the decoder matrix to external runtime tests
+// without making the production runtime API public.
+func ObfStringDataV2ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64) []byte {
+	if len(ciphertext) == 0 {
+		return nil
+	}
+	var p *byte
+	var n int
+	switch decoder & 3 {
+	case 0:
+		p, n = obfStringDataV2A(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	case 1:
+		p, n = obfStringDataV2B(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	case 2:
+		p, n = obfStringDataV2C(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	default:
+		p, n = obfStringDataV2D(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	}
+	return unsafe.Slice(p, n)
+}
+
 var Fadd64 = fadd64
 var Fsub64 = fsub64
 var Fmul64 = fmul64
