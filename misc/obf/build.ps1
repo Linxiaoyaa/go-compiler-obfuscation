@@ -7,6 +7,8 @@ param(
 
     [string]$Pattern = "",
     [string]$Seed = "",
+    [string]$SeedFile = "",
+    [string]$SeedEnv = "GO_OBF_SEED",
     [string]$Cache = "",
     [string]$Report = "",
     [string[]]$ScanPlaintext = @(),
@@ -16,7 +18,8 @@ param(
     [switch]$NoObfuscateMagic,
     [switch]$NoRandomizeLayout,
     [switch]$NoObfuscateFileNames,
-    [switch]$KeepSymbols
+    [switch]$KeepSymbols,
+    [switch]$ShowSeed
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +31,40 @@ function Resolve-UserPath {
         return [System.IO.Path]::GetFullPath($Value)
     }
     return [System.IO.Path]::GetFullPath((Join-Path ([string](Get-Location).Path) $Value))
+}
+
+function Get-GitRevision {
+    param([string]$Directory)
+
+    try {
+        $value = @(& git -C $Directory rev-parse HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $value.Count -gt 0) {
+            return ([string]$value[0]).Trim()
+        }
+    } catch {
+    }
+    return ""
+}
+
+function Get-GitDirty {
+    param([string]$Directory)
+
+    try {
+        $value = @(& git -C $Directory status --porcelain --untracked-files=no 2>$null)
+        return $LASTEXITCODE -eq 0 -and $value.Count -gt 0
+    } catch {
+        return $null
+    }
+}
+
+function Get-SeedFromFile {
+    param([string]$Path)
+
+    $value = [System.IO.File]::ReadAllText($Path).Trim()
+    if ([string]::IsNullOrEmpty($value)) {
+        throw "SeedFile is empty: $Path"
+    }
+    return $value
 }
 
 function Find-ByteSequence {
@@ -278,6 +315,27 @@ if (-not (Test-Path -LiteralPath $go)) {
     throw "Custom Go compiler is not built: $go"
 }
 
+$seedSource = if ($Seed) { "parameter" } else { "generated" }
+if ($Seed -and $SeedFile) {
+    throw "Seed and SeedFile are mutually exclusive"
+}
+if ($SeedEnv -and $SeedEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+    throw "SeedEnv must be a valid environment variable name"
+}
+if ($SeedFile) {
+    $seedPath = Resolve-UserPath -Value $SeedFile
+    if (-not (Test-Path -LiteralPath $seedPath -PathType Leaf)) {
+        throw "SeedFile does not exist: $seedPath"
+    }
+    $Seed = Get-SeedFromFile -Path $seedPath
+    $seedSource = "file"
+} elseif (-not $Seed -and $SeedEnv) {
+    $environmentSeed = [Environment]::GetEnvironmentVariable($SeedEnv, "Process")
+    if ($environmentSeed) {
+        $Seed = $environmentSeed.Trim()
+        $seedSource = "environment:$SeedEnv"
+    }
+}
 if (-not $Seed) {
     $bytes = New-Object byte[] 16
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -291,6 +349,7 @@ if (-not $Seed) {
 if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
     throw "Seed may contain only letters, digits, dot, underscore, and hyphen"
 }
+$seedFingerprint = Get-Sha256Text -Value ("go-obf-seed-v1/" + $Seed)
 
 if (-not $Cache) {
     $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v10"
@@ -301,11 +360,17 @@ New-Item -ItemType Directory -Path $Cache -Force | Out-Null
 $oldGOROOT = $env:GOROOT
 $oldGOCACHE = $env:GOCACHE
 $oldGOTOOLCHAIN = $env:GOTOOLCHAIN
+$oldObfSeed = $env:GO_OBF_SEED
+$temporaryOut = $null
 $temporaryReport = $null
+$artifactBackup = $null
+$reportBackup = $null
+$publishedArtifactWasNew = $false
 try {
     $env:GOROOT = $root
     $env:GOCACHE = $Cache
     $env:GOTOOLCHAIN = "local"
+    $env:GO_OBF_SEED = $Seed
 
     if (-not $Pattern) {
         $moduleLine = & $go list -m -f '{{.Path}}' 2>$null | Select-Object -First 1
@@ -332,14 +397,16 @@ try {
         if ($reportDir) {
             New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
         }
-        if (Test-Path -LiteralPath $reportPath) {
-            Remove-Item -LiteralPath $reportPath -Force
-        }
+    }
+
+    $temporaryOut = "$outPath.tmp.$PID"
+    if (Test-Path -LiteralPath $temporaryOut) {
+        Remove-Item -LiteralPath $temporaryOut -Force
     }
 
     $nameFlag = if ($NoObfuscateNames) { "" } else { ",obfnames=1" }
-    $gcflags = "$Pattern=-d=obfseed=$Seed,obfreport=1$nameFlag"
-    $args = @("build", "-trimpath", "-gcflags=$gcflags", "-o", $outPath)
+    $gcflags = "$Pattern=-d=obfseedenv=GO_OBF_SEED,obfseedid=$seedFingerprint,obfreport=1$nameFlag"
+    $args = @("build", "-trimpath", "-gcflags=$gcflags", "-o", $temporaryOut)
 
     $entryKey = $null
     $magic = $null
@@ -376,7 +443,11 @@ try {
 
     Write-Host "compiler: $go"
     Write-Host "pattern:  $Pattern"
-    Write-Host "seed:     $Seed"
+    Write-Host "seed:     fingerprint=$seedFingerprint"
+    Write-Host "seed-source: $seedSource"
+    if ($ShowSeed) {
+        Write-Host "seed-value: $Seed"
+    }
     Write-Host "cache:    $Cache"
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
@@ -408,11 +479,9 @@ try {
         exit $buildExitCode
     }
 
-    $artifact = Get-Item -LiteralPath $outPath
-    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $outPath
     $artifactBytes = $null
     if ($Report -or $ScanPlaintext.Count -gt 0) {
-        $artifactBytes = [System.IO.File]::ReadAllBytes($outPath)
+        $artifactBytes = [System.IO.File]::ReadAllBytes($temporaryOut)
     }
     $scanResults = @()
     if ($ScanPlaintext.Count -gt 0) {
@@ -436,10 +505,9 @@ try {
         Write-Host "scan:     $($ScanPlaintext.Count) plaintext value(s) absent"
     }
 
-    Write-Host "output:   $($artifact.FullName)"
-    Write-Host "size:     $($artifact.Length)"
-    Write-Host "sha256:   $($hash.Hash)"
-    Write-Host ("elapsed:  {0:N3}s" -f $stopwatch.Elapsed.TotalSeconds)
+    $temporaryArtifact = Get-Item -LiteralPath $temporaryOut
+    $artifactLength = [int64]$temporaryArtifact.Length
+    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $temporaryOut
 
     if ($reportPath) {
         $protectedPrefix = "obf.fn."
@@ -474,32 +542,65 @@ try {
             $entryKeyBytesForProfile = Convert-BytesToHex -Value $entryKeyBytes
             $entryKeyCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $entryKeyBytes
         }
-        $compilerVersion = ""
+        $driverVersion = ""
         try {
             $versionOutput = @(& $go version 2>$null)
             if ($versionOutput.Count -gt 0) {
-                $compilerVersion = ([string]$versionOutput[0]).Trim()
+                $driverVersion = ([string]$versionOutput[0]).Trim()
             }
         } catch {
-            $compilerVersion = ""
+            $driverVersion = ""
         }
+        $goToolDirOutput = @(& $go env GOTOOLDIR 2>$null)
+        $goToolDir = if ($goToolDirOutput.Count -gt 0) { ([string]$goToolDirOutput[0]).Trim() } else { "" }
+        $compilerName = if ($env:OS -eq "Windows_NT") { "compile.exe" } else { "compile" }
+        $compilerPath = if ($goToolDir) { Join-Path $goToolDir $compilerName } else { "" }
+        if (-not $compilerPath -or -not (Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
+            throw "Go compiler executable was not found in GOTOOLDIR"
+        }
+        $compilerVersionOutput = @(& $go tool compile -V=full 2>$null)
+        $compilerVersion = if ($compilerVersionOutput.Count -gt 0) { ([string]$compilerVersionOutput[0]).Trim() } else { "" }
+        $compilerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $compilerPath).Hash.ToLowerInvariant()
+        $driverHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $go).Hash.ToLowerInvariant()
+        $compilerCommit = Get-GitRevision -Directory $root
+        $compilerDirty = Get-GitDirty -Directory $root
+        $targetValues = @(& $go env GOOS GOARCH CGO_ENABLED 2>$null)
+        $targetGoos = if ($targetValues.Count -gt 0) { ([string]$targetValues[0]).Trim() } else { "" }
+        $targetGoarch = if ($targetValues.Count -gt 1) { ([string]$targetValues[1]).Trim() } else { "" }
+        $targetCgo = if ($targetValues.Count -gt 2) { ([string]$targetValues[2]).Trim() } else { "" }
         $profile = [ordered]@{
             schema = "go-obf-profile/v1"
             version = 1
             generatedAtUtc = [DateTime]::UtcNow.ToString("o")
             compiler = [ordered]@{
-                path = [System.IO.Path]::GetFullPath($go)
+                path = [System.IO.Path]::GetFullPath($compilerPath)
                 version = $compilerVersion
+                sha256 = $compilerHash
+                commit = $compilerCommit
+                dirty = $compilerDirty
+                driver = [ordered]@{
+                    path = [System.IO.Path]::GetFullPath($go)
+                    version = $driverVersion
+                    sha256 = $driverHash
+                }
             }
             build = [ordered]@{
                 package = $Package
                 pattern = $Pattern
-                output = $artifact.FullName
+                output = $outPath
                 cache = $Cache
+                gcflags = $gcflags
+                ldflags = ($ldflags -join " ")
+                target = [ordered]@{
+                    GOOS = $targetGoos
+                    GOARCH = $targetGoarch
+                    CGO_ENABLED = $targetCgo
+                }
                 seed = [ordered]@{
                     algorithm = "sha256"
                     domain = "go-obf-seed-v1"
-                    fingerprint = Get-Sha256Text -Value ("go-obf-seed-v1/" + $Seed)
+                    fingerprint = $seedFingerprint
+                    source = $seedSource
                 }
                 symbols = if ($KeepSymbols) { "kept" } else { "stripped" }
             }
@@ -514,8 +615,8 @@ try {
                 vm = "v3"
             }
             artifact = [ordered]@{
-                path = $artifact.FullName
-                size = [int64]$artifact.Length
+                path = $outPath
+                size = $artifactLength
                 sha256 = $hash.Hash.ToLowerInvariant()
                 elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
             }
@@ -551,15 +652,67 @@ try {
         $json = $profile | ConvertTo-Json -Depth 12
         $temporaryReport = "$reportPath.tmp.$PID"
         Set-Content -LiteralPath $temporaryReport -Value $json -Encoding UTF8
-        Move-Item -LiteralPath $temporaryReport -Destination $reportPath -Force
-        $temporaryReport = $null
+    }
+
+    if (Test-Path -LiteralPath $outPath -PathType Leaf) {
+        $artifactBackup = "$outPath.rollback.$PID"
+        [System.IO.File]::Replace($temporaryOut, $outPath, $artifactBackup, $true)
+    } else {
+        [System.IO.File]::Move($temporaryOut, $outPath)
+        $publishedArtifactWasNew = $true
+    }
+    $temporaryOut = $null
+    try {
+        if ($reportPath) {
+            if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+                $reportBackup = "$reportPath.rollback.$PID"
+                [System.IO.File]::Replace($temporaryReport, $reportPath, $reportBackup, $true)
+            } else {
+                [System.IO.File]::Move($temporaryReport, $reportPath)
+            }
+            $temporaryReport = $null
+        }
+    } catch {
+        if ($artifactBackup -and (Test-Path -LiteralPath $artifactBackup -PathType Leaf)) {
+            $failedArtifact = "$outPath.failed.$PID"
+            [System.IO.File]::Replace($artifactBackup, $outPath, $failedArtifact, $true)
+            $artifactBackup = $null
+            Remove-Item -LiteralPath $failedArtifact -Force -ErrorAction SilentlyContinue
+        } elseif ($publishedArtifactWasNew -and (Test-Path -LiteralPath $outPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $outPath -Force
+        }
+        throw
+    }
+
+    if ($artifactBackup -and (Test-Path -LiteralPath $artifactBackup)) {
+        Remove-Item -LiteralPath $artifactBackup -Force -ErrorAction SilentlyContinue
+        $artifactBackup = $null
+    }
+    if ($reportBackup -and (Test-Path -LiteralPath $reportBackup)) {
+        Remove-Item -LiteralPath $reportBackup -Force -ErrorAction SilentlyContinue
+        $reportBackup = $null
+    }
+
+    Write-Host "output:   $outPath"
+    Write-Host "size:     $artifactLength"
+    Write-Host "sha256:   $($hash.Hash)"
+    Write-Host ("elapsed:  {0:N3}s" -f $stopwatch.Elapsed.TotalSeconds)
+    if ($reportPath) {
         Write-Host "report:   $reportPath"
     }
 } finally {
+    if ($temporaryOut -and (Test-Path -LiteralPath $temporaryOut)) {
+        Remove-Item -LiteralPath $temporaryOut -Force -ErrorAction SilentlyContinue
+    }
     if ($temporaryReport -and (Test-Path -LiteralPath $temporaryReport)) {
         Remove-Item -LiteralPath $temporaryReport -Force -ErrorAction SilentlyContinue
     }
     $env:GOROOT = $oldGOROOT
     $env:GOCACHE = $oldGOCACHE
     $env:GOTOOLCHAIN = $oldGOTOOLCHAIN
+    if ($null -eq $oldObfSeed) {
+        Remove-Item Env:GO_OBF_SEED -ErrorAction SilentlyContinue
+    } else {
+        $env:GO_OBF_SEED = $oldObfSeed
+    }
 }

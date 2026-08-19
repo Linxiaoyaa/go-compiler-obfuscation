@@ -63,6 +63,8 @@ type DebugFlags struct {
 	ObfNames              int    `help:"replace names of explicitly protected non-exported functions with deterministic hash names" concurrent:"ok"`
 	ObfReport             int    `help:"report application of //go:obf, //go:encrypt, and //go:vm" concurrent:"ok"`
 	ObfSeed               string `help:"deterministic seed for protection transformations" concurrent:"ok"`
+	ObfSeedEnv            string `help:"read the protection seed from this environment variable when obfseed is empty" concurrent:"ok"`
+	ObfSeedID             string `help:"non-secret protection seed identity used to separate compiler cache entries" concurrent:"ok"`
 	PCTab                 string `help:"print named pc-value table\nOne of: pctospadj, pctofile, pctoline, pctoinline, pctopcdata"`
 	Panic                 int    `help:"show all compiler panics"`
 	Reshape               int    `help:"print information about expression reshaping"`

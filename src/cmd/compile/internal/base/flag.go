@@ -206,6 +206,10 @@ func ParseFlags() {
 		Flag.LowerD.Set(gcd)
 	}
 
+	if err := resolveObfSeed(&Debug, os.Getenv); err != nil {
+		log.Fatal(err)
+	}
+
 	if Debug.Gossahash != "" {
 		hashDebug = NewHashDebug("gossahash", Debug.Gossahash, nil)
 	}

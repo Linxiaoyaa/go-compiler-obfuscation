@@ -1,4 +1,4 @@
-# Go protection compiler v3.6 (String v2 + hardened pclntab/layout)
+# Go protection compiler v3.7 (release integrity + protected seed transport)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -82,7 +82,9 @@ The script generates a random seed unless `-Seed` is supplied, strips symbols by
 
 ### Build profiles and independent verification
 
-Pass `-Report <path>` to write a `go-obf-profile/v1` JSON profile after a successful build. The profile records the compiler and final pattern, protection modes, artifact size/hash/elapsed time, marker offsets/counts, parsed `OBFREPORT` summaries, and digest-only plaintext scan results. The raw seed is never written to the profile. Relative `-Out`, `-Report`, and `-Cache` paths resolve against the caller's current directory. A failed compiler invocation or plaintext scan removes any previous report and does not create a success profile.
+Pass `-Report <path>` to write a `go-obf-profile/v1` JSON profile after a successful build. The profile records the compiler version, binary hash and source revision, target tuple, final pattern, protection modes, artifact size/hash/elapsed time, marker offsets/counts, parsed `OBFREPORT` summaries, and digest-only plaintext scan results. The raw seed is never written to the profile or compiler command line when the default environment-seed path is used. Relative `-Out`, `-Report`, `-Cache`, and `-SeedFile` paths resolve against the caller's current directory. The linker output and profile are prepared in same-directory temporary files and published only after compilation and plaintext scans succeed. A failed build removes temporary files while leaving an existing artifact/profile pair untouched; replacing an existing artifact uses the platform's atomic file-replacement primitive and keeps a rollback copy until the matching profile is published.
+
+Seed input precedence is `-Seed`, then `-SeedFile`, then the environment variable named by `-SeedEnv` (default `GO_OBF_SEED`), then a generated random seed. For release builds prefer `-SeedFile` or `GO_OBF_SEED`; the script prints only a SHA-256 fingerprint by default. `-ShowSeed` is intended for local diagnostics and restores the raw value in console output. The compiler receives the seed through `-d=obfseedenv=GO_OBF_SEED`; `obfseedid=<fingerprint>` separates build-cache entries without exposing the seed in compiler arguments.
 
 ```powershell
 $build = 'D:\Projection\GoProject\go-compiler\misc\obf\build.ps1'
@@ -99,7 +101,27 @@ $build = 'D:\Projection\GoProject\go-compiler\misc\obf\build.ps1'
   -ExpectedAbsent @('literal-that-must-not-appear')
 ```
 
-`verify.ps1` emits one machine-readable JSON result and exits `0` only when every applicable check passes. It independently checks the profile schema, artifact path/size/SHA-256, hidden or retained protected names, hashed pclntab source names, the recorded pclntab magic, the encoded entry-key marker, and any `-ForbiddenText`/`-ExpectedAbsent` values. Function-name checks use the compiler's `name=hash-v1` report marker, so exported APIs that intentionally retain stable names are recorded as compatibility skips. The profile stores only hashes for build-time plaintext scans, so pass those values again when the verifier must rescan them; without them the result marks that check as `skip` instead of claiming an independent scan. A mismatched artifact or profile exits `1`; a missing/invalid profile or artifact exits `2`.
+For a release pipeline, keep the seed outside the command line and bind verification to an external digest and coverage manifest:
+
+```powershell
+$env:GO_OBF_SEED = Get-Content .\secrets\obf-seed.txt -Raw
+& $build -Package . -Out .\dist\app.exe -Report .\dist\app.profile.json
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& 'D:\Projection\GoProject\go-compiler\misc\obf\verify.ps1' `
+  -Artifact .\dist\app.exe `
+  -Profile .\dist\app.profile.json `
+  -ExpectedSha256 $env:EXPECTED_ARTIFACT_SHA256 `
+  -ExpectedProfileSha256 $env:EXPECTED_PROFILE_SHA256 `
+  -ExpectedSeedFingerprint $env:EXPECTED_OBF_SEED_FINGERPRINT `
+  -ExpectedCompilerSha256 $env:EXPECTED_COMPILER_SHA256 `
+  -ExpectedCompilerCommit $env:EXPECTED_COMPILER_COMMIT `
+  -RequireCleanCompiler `
+  -RequireFunction 'example.com/module/internal.process' `
+  -MinReportFunctions 1
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
+`verify.ps1` emits one machine-readable JSON result and exits `0` only when every applicable check passes. It independently checks the profile schema, artifact path/size/SHA-256, optional externally supplied artifact/compiler/seed fingerprints, required function coverage, hidden or retained protected names, hashed pclntab source names, the recorded pclntab magic, the encoded entry-key marker, and any `-ForbiddenText`/`-ExpectedAbsent` values. Function-name checks use the compiler's `name=hash-v1` report marker, so exported APIs that intentionally retain stable names are recorded as compatibility skips. The profile stores only hashes for build-time plaintext scans, so pass those values again when the verifier must rescan them; without them the result marks that check as `skip` instead of claiming an independent scan. A mismatched artifact or profile exits `1`; a missing/invalid profile or artifact exits `2`.
 
 For CI, make the verifier a separate step so a changed executable cannot reuse an old successful build result:
 

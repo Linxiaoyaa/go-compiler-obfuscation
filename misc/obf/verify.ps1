@@ -5,6 +5,14 @@ param(
     [Parameter(Mandatory = $true, Position = 1)]
     [string]$Profile,
 
+    [string]$ExpectedSha256 = "",
+    [string]$ExpectedProfileSha256 = "",
+    [string]$ExpectedSeedFingerprint = "",
+    [string]$ExpectedCompilerSha256 = "",
+    [string]$ExpectedCompilerCommit = "",
+    [switch]$RequireCleanCompiler,
+    [string[]]$RequireFunction = @(),
+    [int]$MinReportFunctions = -1,
     [string[]]$ForbiddenText = @(),
     [string[]]$ExpectedAbsent = @()
 )
@@ -125,6 +133,7 @@ function Emit-Result {
         ok = ($failures.Count -eq 0)
         artifact = $artifactPath
         profile = $profilePath
+        profileSha256 = $profileFileHash
         checks = @($checks)
         failures = @($failures)
     }
@@ -137,11 +146,21 @@ $failures = New-Object System.Collections.ArrayList
 $artifactPath = Resolve-UserPath -Value $Artifact
 $profilePath = Resolve-UserPath -Value $Profile
 $profileObject = $null
+$profileFileHash = $null
 $artifactBytes = $null
 
 if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
     Add-Check -Name "profile.exists" -Status "fail" -Expected $true -Actual $false -Detail "profile file does not exist"
     Emit-Result -ExitCode 2
+}
+
+$profileFileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $profilePath).Hash.ToLowerInvariant()
+if ($ExpectedProfileSha256) {
+    $expectedProfileHashValid = $ExpectedProfileSha256 -match '^[0-9a-fA-F]{64}$'
+    Add-Check -Name "external.profile-sha256.format" -Status $(if ($expectedProfileHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedProfileSha256
+    if ($expectedProfileHashValid) {
+        Add-Check -Name "external.profile-sha256" -Status $(if ($ExpectedProfileSha256.ToLowerInvariant() -eq $profileFileHash) { "pass" } else { "fail" }) -Expected $ExpectedProfileSha256.ToLowerInvariant() -Actual $profileFileHash
+    }
 }
 
 try {
@@ -178,6 +197,14 @@ $artifactItem = Get-Item -LiteralPath $artifactPath
 $artifactHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactPath).Hash.ToLowerInvariant()
 $profileArtifact = $profileObject.artifact
 
+if ($ExpectedSha256) {
+    $expectedHashValid = $ExpectedSha256 -match '^[0-9a-fA-F]{64}$'
+    Add-Check -Name "external.sha256.format" -Status $(if ($expectedHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedSha256
+    if ($expectedHashValid) {
+        Add-Check -Name "external.sha256" -Status $(if ($ExpectedSha256.ToLowerInvariant() -eq $artifactHash) { "pass" } else { "fail" }) -Expected $ExpectedSha256.ToLowerInvariant() -Actual $artifactHash
+    }
+}
+
 $profilePathMatches = $false
 if ($null -ne $profileArtifact -and $profileArtifact.path) {
     try {
@@ -205,11 +232,77 @@ Add-Check -Name "artifact.size" -Status $(if ($sizeMatches) { "pass" } else { "f
 $hashMatches = $null -ne $profileArtifact -and ([string]$profileArtifact.sha256).ToLowerInvariant() -eq $artifactHash
 Add-Check -Name "artifact.sha256" -Status $(if ($hashMatches) { "pass" } else { "fail" }) -Expected $(if ($null -eq $profileArtifact) { $null } else { $profileArtifact.sha256 }) -Actual $artifactHash
 
+$compilerProfile = $profileObject.compiler
+if ($null -ne $compilerProfile -and $compilerProfile.sha256) {
+    $profileCompilerHash = [string]$compilerProfile.sha256
+    $profileCompilerHashValid = $profileCompilerHash -match '^[0-9a-fA-F]{64}$'
+    Add-Check -Name "compiler.sha256.format" -Status $(if ($profileCompilerHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $profileCompilerHash
+    if ($profileCompilerHashValid -and $compilerProfile.path) {
+        try {
+            $compilerPath = Resolve-UserPath -Value ([string]$compilerProfile.path)
+            if (Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+                $actualCompilerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $compilerPath).Hash.ToLowerInvariant()
+                Add-Check -Name "compiler.binary-sha256" -Status $(if ($actualCompilerHash -eq $profileCompilerHash.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $profileCompilerHash.ToLowerInvariant() -Actual $actualCompilerHash
+            } else {
+                Add-Check -Name "compiler.binary-sha256" -Status "skip" -Expected $profileCompilerHash.ToLowerInvariant() -Actual "missing" -Detail "profile compiler path is not available on this machine"
+            }
+        } catch {
+            Add-Check -Name "compiler.binary-sha256" -Status "fail" -Expected $profileCompilerHash.ToLowerInvariant() -Actual "error" -Detail $_.Exception.Message
+        }
+    }
+}
+if ($ExpectedCompilerSha256) {
+    $compilerHash = if ($null -eq $compilerProfile) { "" } else { [string]$compilerProfile.sha256 }
+    $expectedCompilerHashValid = $ExpectedCompilerSha256 -match '^[0-9a-fA-F]{64}$'
+    Add-Check -Name "external.compiler.sha256.format" -Status $(if ($expectedCompilerHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedCompilerSha256
+    if ($expectedCompilerHashValid) {
+        Add-Check -Name "external.compiler.sha256" -Status $(if ($compilerHash -and $compilerHash.ToLowerInvariant() -eq $ExpectedCompilerSha256.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $ExpectedCompilerSha256.ToLowerInvariant() -Actual $compilerHash
+    }
+}
+if ($ExpectedCompilerCommit) {
+    $compilerCommit = if ($null -eq $compilerProfile) { "" } else { [string]$compilerProfile.commit }
+    Add-Check -Name "external.compiler.commit" -Status $(if ($compilerCommit -and $compilerCommit -eq $ExpectedCompilerCommit) { "pass" } else { "fail" }) -Expected $ExpectedCompilerCommit -Actual $compilerCommit
+}
+if ($RequireCleanCompiler) {
+    $compilerDirty = if ($null -eq $compilerProfile) { $null } else { $compilerProfile.dirty }
+    Add-Check -Name "external.compiler.clean" -Status $(if ($compilerDirty -eq $false) { "pass" } else { "fail" }) -Expected $false -Actual $compilerDirty
+}
+
+$buildProfile = $profileObject.build
+$seedProfile = if ($null -eq $buildProfile) { $null } else { $buildProfile.seed }
+$profileSeedFingerprint = if ($null -eq $seedProfile) { "" } else { [string]$seedProfile.fingerprint }
+if ($profileSeedFingerprint) {
+    Add-Check -Name "seed-fingerprint.format" -Status $(if ($profileSeedFingerprint -match '^[0-9a-fA-F]{64}$') { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $profileSeedFingerprint
+}
+if ($ExpectedSeedFingerprint) {
+    $seedFingerprintValid = $ExpectedSeedFingerprint -match '^[0-9a-fA-F]{64}$'
+    Add-Check -Name "external.seed-fingerprint.format" -Status $(if ($seedFingerprintValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedSeedFingerprint
+    if ($seedFingerprintValid) {
+        Add-Check -Name "external.seed-fingerprint" -Status $(if ($profileSeedFingerprint.ToLowerInvariant() -eq $ExpectedSeedFingerprint.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $ExpectedSeedFingerprint.ToLowerInvariant() -Actual $profileSeedFingerprint
+    }
+}
+
 $protection = $profileObject.protection
 $markers = $profileObject.markers
 $reportFunctions = @()
 if ($null -ne $profileObject.obfReport) {
     $reportFunctions = @($profileObject.obfReport.functions)
+    $recordedReportCount = -1
+    try {
+        $recordedReportCount = [int]$profileObject.obfReport.count
+    } catch {
+        $recordedReportCount = -1
+    }
+    Add-Check -Name "coverage.report-count" -Status $(if ($recordedReportCount -eq $reportFunctions.Count) { "pass" } else { "fail" }) -Expected $recordedReportCount -Actual $reportFunctions.Count
+}
+$reportFunctionNames = @($reportFunctions | ForEach-Object { [string]$_.name })
+if ($MinReportFunctions -ge 0) {
+    Add-Check -Name "coverage.minimum-functions" -Status $(if ($reportFunctions.Count -ge $MinReportFunctions) { "pass" } else { "fail" }) -Expected ">=$MinReportFunctions" -Actual $reportFunctions.Count
+}
+foreach ($requiredFunction in @($RequireFunction | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })) {
+    $requiredName = [string]$requiredFunction
+    $requiredPresent = $reportFunctionNames -contains $requiredName
+    Add-Check -Name ("coverage.function/" + (Get-Sha256Text -Value $requiredName).Substring(0, 16)) -Status $(if ($requiredPresent) { "pass" } else { "fail" }) -Expected "reported" -Actual $(if ($requiredPresent) { "reported" } else { "missing" })
 }
 $protectedFunctions = @($reportFunctions | Where-Object {
     $_.name -and ([string]$_.requested -notmatch '(^|,)noprotect(,|$)')
