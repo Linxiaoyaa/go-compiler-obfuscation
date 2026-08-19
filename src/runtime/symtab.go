@@ -611,6 +611,13 @@ func moduledataverify() {
 
 const debugPcln = false
 
+// obfEntryOffKey is populated by the linker for builds that encode the
+// per-function entry offsets in pclntab. The non-zero sentinel keeps this in
+// initialized data so the linker can patch it in place.
+const obfEntryOffDisabled uint32 = 0xa5a5a5a5
+
+var obfEntryOffKey uint32 = obfEntryOffDisabled
+
 // moduledataverify1 should be an internal detail,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
@@ -899,7 +906,15 @@ func (f *_func) isInlined() bool {
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
 func (f funcInfo) entry() uintptr {
-	return f.datap.textAddr(f.entryOff)
+	entryOff := f.entryOff
+	if key := obfEntryOffKey; key != obfEntryOffDisabled {
+		x := uint32(f.nameOff) ^ f.cuOffset ^ uint32(f.startLine) ^ 0xa5f03c17
+		x ^= x << 7
+		x ^= x >> 9
+		x *= 0x9e3779b9
+		entryOff ^= (x | 1) * key
+	}
+	return f.datap.textAddr(entryOff)
 }
 
 //go:linkname badFuncInfoEntry runtime.funcInfo.entry

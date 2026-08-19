@@ -11,6 +11,7 @@ param(
     [string[]]$ScanPlaintext = @(),
     [switch]$NoObfuscateNames,
     [switch]$KeepPclnNames,
+    [switch]$NoObfuscateEntryOff,
     [switch]$KeepSymbols
 )
 
@@ -44,6 +45,23 @@ function Find-ByteSequence {
     return -1
 }
 
+function Get-ObfEntryKey {
+    param([string]$Value)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Value))
+    } finally {
+        $sha.Dispose()
+    }
+    $key = [uint64][BitConverter]::ToUInt32($digest, 0)
+    $key = $key -bor [uint64]1
+    if ($key -eq 0 -or $key -eq [uint64]2779096485) {
+        $key = [uint64]0x6d2b79f5
+    }
+    return [uint64]$key
+}
+
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $go = Join-Path $root "bin\go.exe"
 if (-not (Test-Path -LiteralPath $go)) {
@@ -65,7 +83,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 }
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v6"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v7"
 }
 $Cache = [System.IO.Path]::GetFullPath($Cache)
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -105,6 +123,10 @@ try {
     $hidePclnNames = -not $NoObfuscateNames -and -not $KeepPclnNames
     if ($hidePclnNames) {
         $ldflags += "-obfpclnnames"
+    }
+    if (-not $NoObfuscateEntryOff) {
+        $entryKey = Get-ObfEntryKey -Value $Seed
+        $ldflags += @("-obfentryoff", "-obfentrykey=$entryKey")
     }
     if ($ldflags.Count -gt 0) {
         $args += "-ldflags=$($ldflags -join ' ')"

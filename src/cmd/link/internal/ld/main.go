@@ -111,6 +111,8 @@ var (
 	flagPruneWeakMap  = flag.Bool("pruneweakmap", true, "prune weak mapinit refs")
 	flagRandLayout    = flag.Int64("randlayout", 0, "randomize function layout")
 	flagObfPclnNames  = flag.Bool("obfpclnnames", false, "remove protected obfuscated function names from runtime pclntab")
+	flagObfEntryOff   = flag.Bool("obfentryoff", false, "encode runtime function entry offsets")
+	flagObfEntryKey   = flag.Uint64("obfentrykey", 0, "32-bit key for encoded runtime function entry offsets")
 	flagAllErrors     = flag.Bool("e", false, "no limit on number of errors reported")
 	cpuprofile        = flag.String("cpuprofile", "", "write cpu profile to `file`")
 	memprofile        = flag.String("memprofile", "", "write memory profile to `file`")

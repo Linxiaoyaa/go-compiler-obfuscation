@@ -147,9 +147,11 @@ func protected() {}
 func visible() {}
 
 func main() {
-	protectedName := runtime.FuncForPC(reflect.ValueOf(protected).Pointer()).Name()
-	visibleName := runtime.FuncForPC(reflect.ValueOf(visible).Pointer()).Name()
-	fmt.Printf("%s|%s", protectedName, visibleName)
+	protectedPC := reflect.ValueOf(protected).Pointer()
+	visiblePC := reflect.ValueOf(visible).Pointer()
+	protectedFunc := runtime.FuncForPC(protectedPC)
+	visibleFunc := runtime.FuncForPC(visiblePC)
+	fmt.Printf("%s|%s|%t|%t", protectedFunc.Name(), visibleFunc.Name(), protectedFunc.Entry() == protectedPC, visibleFunc.Entry() == visiblePC)
 }
 `
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0666); err != nil {
@@ -174,11 +176,12 @@ func main() {
 		return string(out)
 	}
 
-	if got := buildAndRun(t, "hidden.exe", "-s -w -obfpclnnames"); got != "|main.visible" {
-		t.Fatalf("hidden pclntab names = %q; want %q", got, "|main.visible")
+	const entryFlags = " -obfentryoff -obfentrykey=305419897"
+	if got := buildAndRun(t, "hidden.exe", "-s -w -obfpclnnames"+entryFlags); got != "|main.visible|true|true" {
+		t.Fatalf("hidden pclntab metadata = %q; want hidden name and decoded entries", got)
 	}
-	if got := buildAndRun(t, "kept.exe", "-s -w"); got != "obf.fn.0123456789abcdef0123456789abcdef|main.visible" {
-		t.Fatalf("kept pclntab names = %q; want hashed protected name", got)
+	if got := buildAndRun(t, "kept.exe", "-s -w"+entryFlags); got != "obf.fn.0123456789abcdef0123456789abcdef|main.visible|true|true" {
+		t.Fatalf("kept pclntab metadata = %q; want hashed protected name and decoded entries", got)
 	}
 }
 

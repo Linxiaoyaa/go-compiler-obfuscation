@@ -21,6 +21,8 @@ import (
 
 const funcSize = 11 * 4 // funcSize is the size of the _func object in runtime/runtime2.go
 
+const obfEntryOffKeySym = "runtime.obfEntryOffKey"
+
 // pclntab holds the state needed for pclntab generation.
 type pclntab struct {
 	// The first and last functions found.
@@ -350,6 +352,36 @@ func (state *pclntab) generateFuncnametab(ctxt *Link, funcs []loader.Sym) map[lo
 
 	state.funcnametab = state.addGeneratedSym(ctxt, "runtime.funcnametab", size, 1, writeFuncNameTab)
 	return nameOffsets
+}
+
+func obfEntryOffDomain(nameOff, cuOffset, startLine uint32) uint32 {
+	x := nameOff ^ cuOffset ^ startLine ^ 0xa5f03c17
+	x ^= x << 7
+	x ^= x >> 9
+	x *= 0x9e3779b9
+	return x | 1
+}
+
+func (ctxt *Link) configureObfEntryOff() {
+	if !*flagObfEntryOff {
+		return
+	}
+	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
+		Exitf("-obfentryoff is supported only for executable and PIE builds")
+	}
+	if *flagObfEntryKey == 0 || *flagObfEntryKey > uint64(^uint32(0)) || uint32(*flagObfEntryKey)&1 == 0 || uint32(*flagObfEntryKey) == 0xa5a5a5a5 {
+		Exitf("-obfentrykey must be a non-zero odd 32-bit value")
+	}
+	key := uint32(*flagObfEntryKey)
+	sym := ctxt.loader.Lookup(obfEntryOffKeySym, 0)
+	if sym == 0 {
+		Exitf("-obfentryoff requires %s", obfEntryOffKeySym)
+	}
+	updater := ctxt.loader.MakeSymbolUpdater(sym)
+	if updater.Size() < 4 {
+		Exitf("%s is too small for -obfentryoff", obfEntryOffKeySym)
+	}
+	updater.SetUint32(ctxt.Arch, 0, key)
 }
 
 const obfuscatedProtectedFuncPrefix = "obf.fn."
@@ -953,6 +985,19 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 			sb.SetUint32(ctxt.Arch, dataoff, uint32(ldr.SymValue(fdsym)))
 		}
 	}
+
+	if key := uint32(*flagObfEntryKey); *flagObfEntryOff {
+		data := sb.Data()
+		for _, start := range startLocations {
+			off := int64(start)
+			entryOff := ctxt.Arch.ByteOrder.Uint32(data[off:])
+			nameOff := ctxt.Arch.ByteOrder.Uint32(data[off+4:])
+			cuOffset := ctxt.Arch.ByteOrder.Uint32(data[off+32:])
+			startLine := ctxt.Arch.ByteOrder.Uint32(data[off+36:])
+			mask := obfEntryOffDomain(nameOff, cuOffset, startLine) * key
+			sb.SetUint32(ctxt.Arch, off, entryOff^mask)
+		}
+	}
 }
 
 // pclntab initializes the pclntab symbol with
@@ -1014,6 +1059,7 @@ func (ctxt *Link) pclntab(container loader.Bitmap) *pclntab {
 	cuOffsets := state.generateFilenameTabs(ctxt, compUnits, funcs)
 	state.generatePctab(ctxt, funcs)
 	inlSyms := makeInlSyms(ctxt, funcs, nameOffsets)
+	ctxt.configureObfEntryOff()
 	state.generateFunctab(ctxt, funcs, inlSyms, cuOffsets, nameOffsets)
 	state.generateFuncdata(ctxt, funcs, inlSyms)
 

@@ -25,3 +25,22 @@ func TestIsObfuscatedProtectedFuncName(t *testing.T) {
 		}
 	}
 }
+
+func TestObfEntryOffDomain(t *testing.T) {
+	base := obfEntryOffDomain(0, ^uint32(0), 42)
+	if base == 0 {
+		t.Fatal("entry offset domain is zero")
+	}
+	if got := obfEntryOffDomain(0, ^uint32(0), 42); got != base {
+		t.Fatalf("entry offset domain is not deterministic: got %#x want %#x", got, base)
+	}
+	for _, input := range [][3]uint32{
+		{1, ^uint32(0), 42},
+		{0, 7, 42},
+		{0, ^uint32(0), 43},
+	} {
+		if got := obfEntryOffDomain(input[0], input[1], input[2]); got == base {
+			t.Fatalf("entry offset domain collision for %#v", input)
+		}
+	}
+}
