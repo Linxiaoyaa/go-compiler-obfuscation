@@ -94,6 +94,16 @@ func protectedStringBranch(flag bool) string {
 	return obfTestBranchSelect(0xfdb97531eca86420, "obf-runtime-branch-odd")
 }
 
+//go:encrypt
+func ProtectedExportedName() string {
+	return "exported-name-stays-stable"
+}
+
+//go:noprotect
+func stableUnprotectedName() string {
+	return "unprotected-name-stays-stable"
+}
+
 func TestProtectionDirectives(t *testing.T) {
 	tests := [][2]uint64{
 		{0, 0},
@@ -166,5 +176,11 @@ func TestProtectionDirectives(t *testing.T) {
 		if got != want {
 			t.Fatalf("protectedStringBranch(%t) = %q; want %q", flag, got, want)
 		}
+	}
+	if got := ProtectedExportedName(); got != "exported-name-stays-stable" {
+		t.Fatalf("ProtectedExportedName() = %q", got)
+	}
+	if got := stableUnprotectedName(); got != "unprotected-name-stays-stable" {
+		t.Fatalf("stableUnprotectedName() = %q", got)
 	}
 }

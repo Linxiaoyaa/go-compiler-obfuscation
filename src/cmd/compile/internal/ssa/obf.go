@@ -139,6 +139,12 @@ func reportProtection(f *Func, flags ir.ProtectionFlag, applied string) {
 	if base.Debug.ObfReport == 0 {
 		return
 	}
+	if fn := f.fe.Func(); fn != nil && fn.Sym() != nil && strings.HasPrefix(fn.Sym().Linkname, "obf.fn.") {
+		if applied != "" {
+			applied += " "
+		}
+		applied += "name=hash-v1"
+	}
 	fmt.Fprintf(os.Stderr, "OBFREPORT function=%q requested=%q applied=%q\n",
 		protectionFunctionName(f), protectionFlagsString(flags), applied)
 }

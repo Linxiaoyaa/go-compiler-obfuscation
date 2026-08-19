@@ -60,6 +60,7 @@ type DebugFlags struct {
 	NoDeadLocals          int    `help:"disable deadlocals pass" concurrent:"ok"`
 	NoOpenDefer           int    `help:"disable open-coded defers" concurrent:"ok"`
 	NoRefName             int    `help:"do not include referenced symbol names in object file" concurrent:"ok"`
+	ObfNames              int    `help:"replace names of explicitly protected non-exported functions with deterministic hash names" concurrent:"ok"`
 	ObfReport             int    `help:"report application of //go:obf, //go:encrypt, and //go:vm" concurrent:"ok"`
 	ObfSeed               string `help:"deterministic seed for protection transformations" concurrent:"ok"`
 	PCTab                 string `help:"print named pc-value table\nOne of: pctospadj, pctofile, pctoline, pctoinline, pctopcdata"`

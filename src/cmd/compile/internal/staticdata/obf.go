@@ -8,9 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"strings"
 
 	"cmd/compile/internal/base"
+	"cmd/compile/internal/ir"
 	"cmd/compile/internal/objw"
+	"cmd/compile/internal/types"
 	"cmd/internal/obj"
 	"cmd/internal/src"
 )
@@ -22,6 +25,52 @@ import (
 type ObfuscatedStringKey struct {
 	Lanes   [4]uint64
 	Decoder uint8
+}
+
+const protectedFunctionFlags = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize
+
+// ObfuscateProtectedFuncLinkname assigns a deterministic, package-independent
+// linker name to a protected non-exported Go function. The source-level name
+// remains intact for type checking and diagnostics; only emitted symbols and
+// propagated linker references change. It returns false for ABI-sensitive or
+// special entry points that must retain their conventional names.
+func ObfuscateProtectedFuncLinkname(fn *ir.Func, seed string) (string, bool) {
+	if fn == nil || fn.Nname == nil || fn.Protection&protectedFunctionFlags == 0 {
+		return "", false
+	}
+	if fn.IsPackageInit() || fn.ABIWrapper() || fn.WasmExport != nil || fn.ABI != obj.ABIInternal {
+		return "", false
+	}
+	sym := fn.Sym()
+	if sym == nil || sym.Pkg == nil || sym.Linkname != "" || sym.Pkg.Path == "runtime" {
+		return "", false
+	}
+	name := sym.Name
+	if name == "main" || name == "init" || name == "TestMain" {
+		return "", false
+	}
+	// Methods participate in wrapper generation, interface method sets, and
+	// reflection metadata; keep their linker identity stable in this first
+	// version. Top-level exported functions are also left alone because external
+	// linkname/plugin users cannot be rewritten by this compiler alone.
+	method := strings.LastIndexByte(name, '.') >= 0
+	localName := name
+	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+		localName = name[dot+1:]
+	}
+	if method || types.IsExported(localName) {
+		return "", false
+	}
+
+	digest := hashParts(
+		[]byte("go-obf-function-link-v1"),
+		[]byte(seed),
+		[]byte(sym.Pkg.Path),
+		[]byte(name),
+	)
+	linkname := "obf.fn." + hex.EncodeToString(digest[:16])
+	sym.Linkname = linkname
+	return linkname, true
 }
 
 // ObfuscatedStringSym emits an encrypted backing symbol for a string literal

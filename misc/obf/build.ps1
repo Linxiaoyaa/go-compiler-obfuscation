@@ -9,6 +9,7 @@ param(
     [string]$Seed = "",
     [string]$Cache = "",
     [string[]]$ScanPlaintext = @(),
+    [switch]$NoObfuscateNames,
     [switch]$KeepSymbols
 )
 
@@ -63,7 +64,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 }
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v4"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v5"
 }
 $Cache = [System.IO.Path]::GetFullPath($Cache)
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -92,7 +93,8 @@ try {
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     }
 
-    $gcflags = "$Pattern=-d=obfseed=$Seed,obfreport=1"
+    $nameFlag = if ($NoObfuscateNames) { "" } else { ",obfnames=1" }
+    $gcflags = "$Pattern=-d=obfseed=$Seed,obfreport=1$nameFlag"
     $args = @("build", "-trimpath", "-gcflags=$gcflags", "-o", $outPath)
     if (-not $KeepSymbols) {
         $args += @("-ldflags=-s -w -buildid=")
@@ -103,6 +105,7 @@ try {
     Write-Host "pattern:  $Pattern"
     Write-Host "seed:     $Seed"
     Write-Host "cache:    $Cache"
+    Write-Host "names:    $(if ($NoObfuscateNames) { 'stable' } else { 'hashed-protected' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     & $go @args
     $stopwatch.Stop()

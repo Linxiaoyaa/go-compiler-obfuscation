@@ -5,7 +5,12 @@
 package staticdata
 
 import (
+	"cmd/compile/internal/ir"
+	"cmd/compile/internal/types"
+	"cmd/internal/obj"
+	"cmd/internal/src"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +84,48 @@ func BenchmarkObfuscatedStringKeyV2(b *testing.B) {
 			"0123456789abcdef0123456789abcdef",
 			"a representative protected string literal",
 		)
+	}
+}
+
+func TestObfuscateProtectedFuncLinkname(t *testing.T) {
+	pkg := types.NewPkg("example.com/obf/sample", "sample")
+	fn := ir.NewFunc(src.NoXPos, src.NoXPos, pkg.Lookup("privateWorker"), types.NewSignature(nil, nil, nil))
+	fn.Protection = ir.ProtectObfuscate
+	name, ok := ObfuscateProtectedFuncLinkname(fn, "seed-a")
+	if !ok || name == "" {
+		t.Fatalf("protected function was not renamed: %q, %t", name, ok)
+	}
+	if name != fn.Sym().Linkname || !strings.HasPrefix(name, "obf.fn.") {
+		t.Fatalf("linkname = %q; want deterministic obf.fn prefix", name)
+	}
+	if got, ok := ObfuscateProtectedFuncLinkname(fn, "seed-b"); ok || got != "" {
+		t.Fatalf("already renamed function changed again: %q, %t", got, ok)
+	}
+	seedA := fn.Sym().Linkname
+	fn.Sym().Linkname = ""
+	seedB, ok := ObfuscateProtectedFuncLinkname(fn, "seed-b")
+	if !ok || seedA == seedB {
+		t.Fatalf("seed did not change hashed name: %q vs %q", seedA, seedB)
+	}
+	linked := ir.NewFunc(src.NoXPos, src.NoXPos, pkg.Lookup("linkedWorker"), types.NewSignature(nil, nil, nil))
+	linked.Protection = ir.ProtectObfuscate
+	linked.Sym().Linkname = "external.linkedWorker"
+	if got, ok := ObfuscateProtectedFuncLinkname(linked, "seed-a"); ok || got != "" {
+		t.Fatalf("existing linkname was replaced with %q", got)
+	}
+
+	for _, name := range []string{"PublicWorker", "main", "init"} {
+		candidate := ir.NewFunc(src.NoXPos, src.NoXPos, pkg.Lookup(name), types.NewSignature(nil, nil, nil))
+		candidate.Protection = ir.ProtectEncrypt
+		if got, ok := ObfuscateProtectedFuncLinkname(candidate, "seed-a"); ok || got != "" {
+			t.Fatalf("special function %q was renamed to %q", name, got)
+		}
+	}
+
+	abi0 := ir.NewFunc(src.NoXPos, src.NoXPos, pkg.Lookup("abi0Worker"), types.NewSignature(nil, nil, nil))
+	abi0.Protection = ir.ProtectVirtualize
+	abi0.ABI = obj.ABI0
+	if got, ok := ObfuscateProtectedFuncLinkname(abi0, "seed-a"); ok || got != "" {
+		t.Fatalf("ABI0 function was renamed to %q", got)
 	}
 }

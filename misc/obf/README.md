@@ -1,4 +1,4 @@
-# Go protection compiler v3.1 (String v2)
+# Go protection compiler v3.2 (String v2 + symbol names)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -29,6 +29,12 @@ func exportedBridge(a, b uint64) uint64 {
 - `//go:noprotect`: explicitly excludes the function and cannot be combined with the other directives.
 
 Protected functions are automatically excluded from inlining. Explicit directives are strict: unsupported functions fail compilation instead of silently losing protection.
+
+## Symbol names
+
+The build script enables Garble-inspired deterministic symbol hashing by default. Explicitly protected, non-exported Go functions are emitted under an `obf.fn.<digest>` linker name derived from the seed, package path, and source function name. The source name remains available to compiler diagnostics, while the linked symbol and normal function metadata use the digest. `main`, `init`, ABI-sensitive functions, existing `//go:linkname` declarations, exported names, methods, and runtime functions retain stable identities. Pass `-NoObfuscateNames` to `build.ps1` when a debugger or external symbol consumer requires the original names.
+
+This is deliberately narrower than the full Garble source transformer: it does not rewrite exported APIs, struct fields, package paths, or reflection-visible identifiers. That boundary keeps ordinary cross-package Go builds and interface dispatch compatible while the protected implementation symbols are hidden.
 
 ## String literals
 
@@ -62,4 +68,4 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
   -ScanPlaintext @('literal-that-must-not-appear')
 ```
 
-The script generates a random seed unless `-Seed` is supplied, strips symbols by default, and uses a dedicated V4 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+The script generates a random seed unless `-Seed` is supplied, strips symbols by default, enables protected-function name hashing, and uses a dedicated V5 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-NoObfuscateNames` for a stable-name diagnostic build. The separate cache is required because this fork adds versioned protection fields to unified IR export data.

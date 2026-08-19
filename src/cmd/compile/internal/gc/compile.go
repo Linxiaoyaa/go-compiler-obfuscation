@@ -17,6 +17,7 @@ import (
 	"cmd/compile/internal/objw"
 	"cmd/compile/internal/pgoir"
 	"cmd/compile/internal/ssagen"
+	"cmd/compile/internal/staticdata"
 	"cmd/compile/internal/staticinit"
 	"cmd/compile/internal/types"
 	"cmd/compile/internal/walk"
@@ -98,6 +99,9 @@ func enqueueFunc(fn *ir.Func, symABIs *ssagen.SymABIs) {
 // prepareFunc handles any remaining frontend compilation tasks that
 // aren't yet safe to perform concurrently.
 func prepareFunc(fn *ir.Func) {
+	if base.Debug.ObfNames != 0 {
+		staticdata.ObfuscateProtectedFuncLinkname(fn, base.Debug.ObfSeed)
+	}
 	// Set up the function's LSym early to avoid data races with the assemblers.
 	// Do this before walk, as walk needs the LSym to set attributes/relocations
 	// (e.g. in MarkTypeUsedInInterface).
