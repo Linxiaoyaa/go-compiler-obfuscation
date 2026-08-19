@@ -317,24 +317,55 @@ func walkFuncs(ctxt *Link, funcs []loader.Sym, f func(loader.Sym)) {
 // func symbol to the name offset in runtime.funcnamtab.
 func (state *pclntab) generateFuncnametab(ctxt *Link, funcs []loader.Sym) map[loader.Sym]uint32 {
 	nameOffsets := make(map[loader.Sym]uint32, state.nfunc)
+	hideProtectedNames := *flagObfPclnNames
 
 	// Write the null terminated strings.
 	writeFuncNameTab := func(ctxt *Link, s loader.Sym) {
 		symtab := ctxt.loader.MakeSymbolUpdater(s)
+		if hideProtectedNames {
+			symtab.AddCStringAt(0, "")
+		}
 		for s, off := range nameOffsets {
+			if hideProtectedNames && off == 0 {
+				continue
+			}
 			symtab.AddCStringAt(int64(off), ctxt.loader.SymName(s))
 		}
 	}
 
 	// Loop through the CUs, and calculate the size needed.
 	var size int64
+	if hideProtectedNames {
+		// nameOff zero is the runtime's empty-name sentinel.
+		size = 1
+	}
 	walkFuncs(ctxt, funcs, func(s loader.Sym) {
+		if hideProtectedNames && isObfuscatedProtectedFuncName(ctxt.loader.SymName(s)) {
+			nameOffsets[s] = 0
+			return
+		}
 		nameOffsets[s] = uint32(size)
 		size += int64(len(ctxt.loader.SymName(s)) + 1) // NULL terminate
 	})
 
 	state.funcnametab = state.addGeneratedSym(ctxt, "runtime.funcnametab", size, 1, writeFuncNameTab)
 	return nameOffsets
+}
+
+const obfuscatedProtectedFuncPrefix = "obf.fn."
+
+func isObfuscatedProtectedFuncName(name string) bool {
+	if len(name) != len(obfuscatedProtectedFuncPrefix)+32 || !strings.HasPrefix(name, obfuscatedProtectedFuncPrefix) {
+		return false
+	}
+	for _, c := range name[len(obfuscatedProtectedFuncPrefix):] {
+		if c < '0' || c > '9' {
+			if c < 'a' || c > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // walkFilenames walks funcs, calling a function for each filename used in each

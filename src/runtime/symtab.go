@@ -1152,6 +1152,9 @@ func funcname(f funcInfo) string {
 
 func funcpkgpath(f funcInfo) string {
 	name := funcNameForPrint(funcname(f))
+	if name == "" {
+		return ""
+	}
 	i := len(name) - 1
 	for ; i > 0; i-- {
 		if name[i] == '/' {

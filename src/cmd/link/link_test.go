@@ -124,6 +124,64 @@ func TestLargeSymName(t *testing.T) {
 	_ = AuthorPaidByTheColumnInch
 }
 
+func TestObfuscatedPclnNames(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+	testenv.MustInternalLink(t, testenv.NoSpecialBuildTypes)
+
+	dir := t.TempDir()
+	const source = `
+package main
+
+import (
+	"fmt"
+	"reflect"
+	"runtime"
+	_ "unsafe"
+)
+
+//go:linkname protected obf.fn.0123456789abcdef0123456789abcdef
+//go:noinline
+func protected() {}
+
+//go:noinline
+func visible() {}
+
+func main() {
+	protectedName := runtime.FuncForPC(reflect.ValueOf(protected).Pointer()).Name()
+	visibleName := runtime.FuncForPC(reflect.ValueOf(visible).Pointer()).Name()
+	fmt.Printf("%s|%s", protectedName, visibleName)
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/pclnfixture\n\ngo 1.26\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	buildAndRun := func(t *testing.T, name, ldflags string) string {
+		t.Helper()
+		exe := filepath.Join(dir, name)
+		cmd := goCmd(t, "build", "-o", exe, "-ldflags="+ldflags, ".")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build failed: %v\n%s", err, out)
+		}
+		out, err := testenv.Command(t, exe).CombinedOutput()
+		if err != nil {
+			t.Fatalf("run failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	if got := buildAndRun(t, "hidden.exe", "-s -w -obfpclnnames"); got != "|main.visible" {
+		t.Fatalf("hidden pclntab names = %q; want %q", got, "|main.visible")
+	}
+	if got := buildAndRun(t, "kept.exe", "-s -w"); got != "obf.fn.0123456789abcdef0123456789abcdef|main.visible" {
+		t.Fatalf("kept pclntab names = %q; want hashed protected name", got)
+	}
+}
+
 func TestIssue21703(t *testing.T) {
 	t.Parallel()
 

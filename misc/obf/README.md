@@ -1,4 +1,4 @@
-# Go protection compiler v3.2 (String v2 + symbol names)
+# Go protection compiler v3.3 (String v2 + hidden symbols)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -32,7 +32,9 @@ Protected functions are automatically excluded from inlining. Explicit directive
 
 ## Symbol names
 
-The build script enables Garble-inspired deterministic symbol hashing by default. Explicitly protected, non-exported Go functions are emitted under an `obf.fn.<digest>` linker name derived from the seed, package path, and source function name. The source name remains available to compiler diagnostics, while the linked symbol and normal function metadata use the digest. `main`, `init`, ABI-sensitive functions, existing `//go:linkname` declarations, exported names, methods, and runtime functions retain stable identities. Pass `-NoObfuscateNames` to `build.ps1` when a debugger or external symbol consumer requires the original names.
+The build script enables Garble-inspired deterministic symbol hashing by default. Explicitly protected, non-exported Go functions are emitted under an `obf.fn.<digest>` linker name derived from the seed, package path, and source function name. The source name remains available to compiler diagnostics. `main`, `init`, ABI-sensitive functions, existing `//go:linkname` declarations, exported names, methods, and runtime functions retain stable identities.
+
+The linker then removes valid `obf.fn.<32 hex digits>` names from `runtime.funcnametab` by mapping their `_func.nameOff` field to the reserved empty-name entry. This closes the remaining name leak after `-s -w` removes the ordinary symbol table and DWARF: protected functions appear unnamed through `runtime.FuncForPC` and pclntab-based reverse-engineering tools, while their entry addresses and file/line metadata remain usable. Pass `-KeepPclnNames` to retain hashed runtime names for diagnostics, or `-NoObfuscateNames` to retain original names throughout the build.
 
 This is deliberately narrower than the full Garble source transformer: it does not rewrite exported APIs, struct fields, package paths, or reflection-visible identifiers. That boundary keeps ordinary cross-package Go builds and interface dispatch compatible while the protected implementation symbols are hidden.
 
@@ -68,4 +70,4 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
   -ScanPlaintext @('literal-that-must-not-appear')
 ```
 
-The script generates a random seed unless `-Seed` is supplied, strips symbols by default, enables protected-function name hashing, and uses a dedicated V5 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-NoObfuscateNames` for a stable-name diagnostic build. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, and uses a dedicated V6 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics or `-NoObfuscateNames` for a stable-name diagnostic build. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
