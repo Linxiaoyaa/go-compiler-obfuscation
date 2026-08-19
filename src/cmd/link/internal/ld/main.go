@@ -113,6 +113,8 @@ var (
 	flagObfPclnNames  = flag.Bool("obfpclnnames", false, "remove protected obfuscated function names from runtime pclntab")
 	flagObfEntryOff   = flag.Bool("obfentryoff", false, "encode runtime function entry offsets")
 	flagObfEntryKey   = flag.Uint64("obfentrykey", 0, "32-bit key for encoded runtime function entry offsets")
+	flagObfPclnMagic  = flag.Bool("obfmagic", false, "use a custom runtime pclntab magic value")
+	flagObfMagicValue = flag.Uint64("obfmagicvalue", 0, "32-bit value for custom runtime pclntab magic")
 	flagAllErrors     = flag.Bool("e", false, "no limit on number of errors reported")
 	cpuprofile        = flag.String("cpuprofile", "", "write cpu profile to `file`")
 	memprofile        = flag.String("memprofile", "", "write memory profile to `file`")

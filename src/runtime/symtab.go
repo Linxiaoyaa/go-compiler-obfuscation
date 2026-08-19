@@ -618,6 +618,22 @@ const obfEntryOffDisabled uint32 = 0xa5a5a5a5
 
 var obfEntryOffKey uint32 = obfEntryOffDisabled
 
+// obfPclnMagic is patched by the custom linker. The split fallback keeps
+// bootstrap linkers compatible without embedding the stock four-byte magic as
+// a second contiguous value in protected binaries.
+const obfPclnMagicUnpatched abi.PCLnTabMagic = 0xa5a5a5a5
+
+var obfPclnMagic = obfPclnMagicUnpatched
+var obfPclnMagicDefaultHi uint32 = 0xffff
+var obfPclnMagicDefaultLo uint32 = 0xfff1
+
+func expectedPclnMagic() abi.PCLnTabMagic {
+	if obfPclnMagic != obfPclnMagicUnpatched {
+		return obfPclnMagic
+	}
+	return abi.PCLnTabMagic(obfPclnMagicDefaultHi<<16 | obfPclnMagicDefaultLo)
+}
+
 // moduledataverify1 should be an internal detail,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
@@ -631,7 +647,7 @@ var obfEntryOffKey uint32 = obfEntryOffDisabled
 func moduledataverify1(datap *moduledata) {
 	// Check that the pclntab's format is valid.
 	hdr := datap.pcHeader
-	if hdr.magic != abi.CurrentPCLnTabMagic || hdr.pad1 != 0 || hdr.pad2 != 0 ||
+	if hdr.magic != expectedPclnMagic() || hdr.pad1 != 0 || hdr.pad2 != 0 ||
 		hdr.minLC != sys.PCQuantum || hdr.ptrSize != goarch.PtrSize {
 		println("runtime: pcHeader: magic=", hex(hdr.magic), "pad1=", hdr.pad1, "pad2=", hdr.pad2,
 			"minLC=", hdr.minLC, "ptrSize=", hdr.ptrSize, "pluginpath=", datap.pluginpath)

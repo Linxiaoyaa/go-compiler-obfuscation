@@ -185,6 +185,31 @@ func main() {
 	}
 }
 
+func TestObfuscatedPclnMagic(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+	testenv.MustInternalLink(t, testenv.NoSpecialBuildTypes)
+
+	dir := t.TempDir()
+	const source = `package main
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/magicfixture\n\ngo 1.26\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "magic.exe")
+	cmd := goCmd(t, "build", "-o", exe, "-ldflags=-s -w -obfmagic -obfmagicvalue=305419901", ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("custom magic build failed: %v\n%s", err, out)
+	}
+	if out, err := testenv.Command(t, exe).CombinedOutput(); err != nil {
+		t.Fatalf("custom magic run failed: %v\n%s", err, out)
+	}
+}
+
 func TestIssue21703(t *testing.T) {
 	t.Parallel()
 

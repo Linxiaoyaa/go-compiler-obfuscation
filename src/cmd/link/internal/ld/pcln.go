@@ -21,7 +21,17 @@ import (
 
 const funcSize = 11 * 4 // funcSize is the size of the _func object in runtime/runtime2.go
 
+// Keep these offsets in sync with runtime._func in runtime/runtime2.go.
+const (
+	funcEntryOffOffset  = 0
+	funcNameOffOffset   = 4
+	funcCUOffsetOffset  = 32
+	funcStartLineOffset = 36
+)
+
 const obfEntryOffKeySym = "runtime.obfEntryOffKey"
+
+const obfPclnMagicSym = "runtime.obfPclnMagic"
 
 // pclntab holds the state needed for pclntab generation.
 type pclntab struct {
@@ -270,7 +280,11 @@ func (state *pclntab) generatePCHeader(ctxt *Link) {
 
 		// Write header.
 		// Keep in sync with runtime/symtab.go:pcHeader and package debug/gosym.
-		header.SetUint32(ctxt.Arch, 0, uint32(abi.CurrentPCLnTabMagic))
+		magic := uint32(abi.CurrentPCLnTabMagic)
+		if *flagObfPclnMagic {
+			magic = uint32(*flagObfMagicValue)
+		}
+		header.SetUint32(ctxt.Arch, 0, magic)
 		header.SetUint8(ctxt.Arch, 6, uint8(ctxt.Arch.MinLC))
 		header.SetUint8(ctxt.Arch, 7, uint8(ctxt.Arch.PtrSize))
 		off := header.SetUint(ctxt.Arch, 8, uint64(state.nfunc))
@@ -382,6 +396,46 @@ func (ctxt *Link) configureObfEntryOff() {
 		Exitf("%s is too small for -obfentryoff", obfEntryOffKeySym)
 	}
 	updater.SetUint32(ctxt.Arch, 0, key)
+}
+
+func (ctxt *Link) configureObfPclnMagic() {
+	magic := uint32(abi.CurrentPCLnTabMagic)
+	if *flagObfPclnMagic {
+		if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
+			Exitf("-obfmagic is supported only for executable and PIE builds")
+		}
+		if *flagObfMagicValue == 0 || *flagObfMagicValue > uint64(^uint32(0)) {
+			Exitf("-obfmagicvalue must be a non-zero 32-bit value")
+		}
+		magic = uint32(*flagObfMagicValue)
+		if !isObfuscatedPclnMagic(magic) {
+			Exitf("-obfmagicvalue must differ from the standard pclntab magic values")
+		}
+	}
+	sym := ctxt.loader.Lookup(obfPclnMagicSym, 0)
+	if sym == 0 {
+		if *flagObfPclnMagic {
+			Exitf("-obfmagic requires %s", obfPclnMagicSym)
+		}
+		return
+	}
+	updater := ctxt.loader.MakeSymbolUpdater(sym)
+	if updater.Size() < 4 {
+		Exitf("%s is too small for -obfmagic", obfPclnMagicSym)
+	}
+	updater.SetUint32(ctxt.Arch, 0, magic)
+}
+
+func isObfuscatedPclnMagic(magic uint32) bool {
+	if magic == 0 {
+		return false
+	}
+	switch abi.PCLnTabMagic(magic) {
+	case abi.Go12PCLnTabMagic, abi.Go116PCLnTabMagic, abi.Go118PCLnTabMagic, abi.Go120PCLnTabMagic:
+		return false
+	default:
+		return true
+	}
 }
 
 const obfuscatedProtectedFuncPrefix = "obf.fn."
@@ -990,12 +1044,12 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 		data := sb.Data()
 		for _, start := range startLocations {
 			off := int64(start)
-			entryOff := ctxt.Arch.ByteOrder.Uint32(data[off:])
-			nameOff := ctxt.Arch.ByteOrder.Uint32(data[off+4:])
-			cuOffset := ctxt.Arch.ByteOrder.Uint32(data[off+32:])
-			startLine := ctxt.Arch.ByteOrder.Uint32(data[off+36:])
+			entryOff := ctxt.Arch.ByteOrder.Uint32(data[off+funcEntryOffOffset:])
+			nameOff := ctxt.Arch.ByteOrder.Uint32(data[off+funcNameOffOffset:])
+			cuOffset := ctxt.Arch.ByteOrder.Uint32(data[off+funcCUOffsetOffset:])
+			startLine := ctxt.Arch.ByteOrder.Uint32(data[off+funcStartLineOffset:])
 			mask := obfEntryOffDomain(nameOff, cuOffset, startLine) * key
-			sb.SetUint32(ctxt.Arch, off, entryOff^mask)
+			sb.SetUint32(ctxt.Arch, off+funcEntryOffOffset, entryOff^mask)
 		}
 	}
 }
@@ -1054,6 +1108,7 @@ func (ctxt *Link) pclntab(container loader.Bitmap) *pclntab {
 	// for pcHeader. This may be raised further by subsymbols.
 	ldr.SetSymAlign(state.carrier, int32(ctxt.Arch.PtrSize))
 
+	ctxt.configureObfPclnMagic()
 	state.generatePCHeader(ctxt)
 	nameOffsets := state.generateFuncnametab(ctxt, funcs)
 	cuOffsets := state.generateFilenameTabs(ctxt, compUnits, funcs)

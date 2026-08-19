@@ -1,4 +1,4 @@
-# Go protection compiler v3.3 (String v2 + hidden symbols)
+# Go protection compiler v3.4 (String v2 + hardened pclntab)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -38,6 +38,8 @@ The linker then removes valid `obf.fn.<32 hex digits>` names from `runtime.funcn
 
 By default the linker also encodes every `_func.entryOff` with a seed-derived odd 32-bit key and a per-record domain. The runtime decodes it only when the linker patches `runtime.obfEntryOffKey`, so ordinary Go builds and tools remain compatible. This mode is limited to standalone executable and PIE outputs; use `-NoObfuscateEntryOff` for a raw-entry diagnostic build.
 
+The linker also uses a seed-derived `pclntab` magic for protected executable/PIE builds and patches the matching runtime verifier value. This prevents tools that assume the stock Go magic from recognizing the table immediately. Use `-NoObfuscateMagic` for a standard-magic diagnostic build.
+
 This is deliberately narrower than the full Garble source transformer: it does not rewrite exported APIs, struct fields, package paths, or reflection-visible identifiers. That boundary keeps ordinary cross-package Go builds and interface dispatch compatible while the protected implementation symbols are hidden.
 
 ## String literals
@@ -72,4 +74,4 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
   -ScanPlaintext @('literal-that-must-not-appear')
 ```
 
-The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, encodes function entry offsets, and uses a dedicated V7 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, or `-NoObfuscateEntryOff` to inspect raw entry offsets. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, encodes function entry offsets, customizes the pclntab magic, and uses a dedicated V8 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, or `-NoObfuscateMagic` to retain the standard pclntab magic. The separate cache is required because this fork adds versioned protection fields to unified IR export data.

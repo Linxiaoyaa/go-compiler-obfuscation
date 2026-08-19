@@ -12,6 +12,7 @@ param(
     [switch]$NoObfuscateNames,
     [switch]$KeepPclnNames,
     [switch]$NoObfuscateEntryOff,
+    [switch]$NoObfuscateMagic,
     [switch]$KeepSymbols
 )
 
@@ -62,6 +63,22 @@ function Get-ObfEntryKey {
     return [uint64]$key
 }
 
+function Get-ObfPclnMagic {
+    param([string]$Value)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("pcln-magic/" + $Value))
+    } finally {
+        $sha.Dispose()
+    }
+    $magic = [uint64][BitConverter]::ToUInt32($digest, 0)
+    if ($magic -eq 0 -or $magic -eq [uint64]2779096485 -or $magic -eq [uint64]4294967291 -or $magic -eq [uint64]4294967290 -or $magic -eq [uint64]4294967280 -or $magic -eq [uint64]4294967281) {
+        $magic = [uint64]305419901
+    }
+    return $magic
+}
+
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $go = Join-Path $root "bin\go.exe"
 if (-not (Test-Path -LiteralPath $go)) {
@@ -83,7 +100,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 }
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v7"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v8"
 }
 $Cache = [System.IO.Path]::GetFullPath($Cache)
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -128,6 +145,10 @@ try {
         $entryKey = Get-ObfEntryKey -Value $Seed
         $ldflags += @("-obfentryoff", "-obfentrykey=$entryKey")
     }
+    if (-not $NoObfuscateMagic) {
+        $magic = Get-ObfPclnMagic -Value $Seed
+        $ldflags += @("-obfmagic", "-obfmagicvalue=$magic")
+    }
     if ($ldflags.Count -gt 0) {
         $args += "-ldflags=$($ldflags -join ' ')"
     }
@@ -139,6 +160,7 @@ try {
     Write-Host "cache:    $Cache"
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
+    Write-Host "pclntab:  $(if ($NoObfuscateMagic) { 'standard-magic' } else { 'seed-magic' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     & $go @args
     $stopwatch.Stop()

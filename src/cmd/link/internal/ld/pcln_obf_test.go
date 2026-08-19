@@ -44,3 +44,16 @@ func TestObfEntryOffDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestObfPclnMagicValue(t *testing.T) {
+	for _, magic := range []uint32{
+		uint32(0xfffffffb), uint32(0xfffffffa), uint32(0xfffffff0), uint32(0xfffffff1), 0,
+	} {
+		if isObfuscatedPclnMagic(magic) {
+			t.Fatalf("standard/zero magic %#x accepted", magic)
+		}
+	}
+	if !isObfuscatedPclnMagic(0x1234567d) {
+		t.Fatal("custom magic rejected")
+	}
+}
