@@ -57,3 +57,19 @@ func TestObfPclnMagicValue(t *testing.T) {
 		t.Fatal("custom magic rejected")
 	}
 }
+
+func TestObfuscatedPclnFileName(t *testing.T) {
+	first := obfuscatedPclnFileName("C:/project/internal/auth/service.go", 0x123456789abcdef0)
+	if len(first) != len("obf.src.")+32 || first[:len("obf.src.")] != "obf.src." {
+		t.Fatalf("hashed filename = %q; want obf.src.<32 hex chars>", first)
+	}
+	if got := obfuscatedPclnFileName("C:/project/internal/auth/service.go", 0x123456789abcdef0); got != first {
+		t.Fatalf("hashed filename is not deterministic: %q vs %q", got, first)
+	}
+	if got := obfuscatedPclnFileName("C:/project/internal/license/service.go", 0x123456789abcdef0); got == first {
+		t.Fatal("different source paths produced the same hashed filename")
+	}
+	if got := obfuscatedPclnFileName("C:/project/internal/auth/service.go", 0xfedcba9876543210); got == first {
+		t.Fatal("different keys produced the same hashed filename")
+	}
+}

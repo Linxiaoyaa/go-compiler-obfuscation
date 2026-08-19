@@ -11,7 +11,9 @@ import (
 	"cmd/link/internal/loader"
 	"cmd/link/internal/sym"
 	"cmp"
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"internal/abi"
 	"internal/buildcfg"
 	"path/filepath"
@@ -514,6 +516,16 @@ func (state *pclntab) generateFilenameTabs(ctxt *Link, compUnits []*sym.Compilat
 	// function, and use that hash value for uniqueness testing.)
 	cuEntries := make([]goobj.CUFileIndex, len(compUnits))
 	fileOffsets := make(map[string]uint32)
+	fileNames := make(map[string]string)
+	if *flagObfFileNames && *flagObfFileKey == 0 {
+		Exitf("-obffilenamekey must be non-zero when -obffilenames is enabled")
+	}
+	fileName := func(filename string) string {
+		if !*flagObfFileNames {
+			return expandFile(filename)
+		}
+		return obfuscatedPclnFileName(filename, *flagObfFileKey)
+	}
 
 	// Walk the filenames.
 	// We store the total filename string length we need to load, and the max
@@ -526,7 +538,8 @@ func (state *pclntab) generateFilenameTabs(ctxt *Link, compUnits []*sym.Compilat
 		filename := cu.FileTable[i]
 		if _, ok := fileOffsets[filename]; !ok {
 			fileOffsets[filename] = uint32(fileSize)
-			fileSize += int64(len(expandFile(filename)) + 1) // NULL terminate
+			fileNames[filename] = fileName(filename)
+			fileSize += int64(len(fileNames[filename]) + 1) // NULL terminate
 		}
 
 		// Find the maximum file index we've seen.
@@ -574,13 +587,27 @@ func (state *pclntab) generateFilenameTabs(ctxt *Link, compUnits []*sym.Compilat
 
 		// Write the strings.
 		for filename, loc := range fileOffsets {
-			sb.AddStringAt(int64(loc), expandFile(filename))
+			sb.AddStringAt(int64(loc), fileNames[filename])
 		}
 	}
 	state.nfiles = uint32(len(fileOffsets))
 	state.filetab = state.addGeneratedSym(ctxt, "runtime.filetab", fileSize, 1, writeFiletab)
 
 	return cuOffsets
+}
+
+func obfuscatedPclnFileName(filename string, key uint64) string {
+	var seed [8]byte
+	binary.LittleEndian.PutUint64(seed[:], key)
+	h1 := fnv.New64a()
+	_, _ = h1.Write([]byte("go-obf-filetab-v1/a"))
+	_, _ = h1.Write(seed[:])
+	_, _ = h1.Write([]byte(filename))
+	h2 := fnv.New64()
+	_, _ = h2.Write([]byte("go-obf-filetab-v1/b"))
+	_, _ = h2.Write(seed[:])
+	_, _ = h2.Write([]byte(filename))
+	return fmt.Sprintf("obf.src.%016x%016x", h1.Sum64(), h2.Sum64())
 }
 
 // generatePctab creates the runtime.pctab variable, holding all the

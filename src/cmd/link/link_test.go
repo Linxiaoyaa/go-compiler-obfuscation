@@ -191,7 +191,16 @@ func TestObfuscatedPclnMagic(t *testing.T) {
 
 	dir := t.TempDir()
 	const source = `package main
-func main() {}
+
+import (
+	"fmt"
+	"runtime"
+)
+
+func main() {
+	_, file, _, _ := runtime.Caller(0)
+	fmt.Print(file)
+}
 `
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0666); err != nil {
 		t.Fatal(err)
@@ -200,13 +209,17 @@ func main() {}
 		t.Fatal(err)
 	}
 	exe := filepath.Join(dir, "magic.exe")
-	cmd := goCmd(t, "build", "-o", exe, "-ldflags=-s -w -obfmagic -obfmagicvalue=305419901", ".")
+	cmd := goCmd(t, "build", "-o", exe, "-ldflags=-s -w -obfmagic -obfmagicvalue=305419901 -obffilenames -obffilenamekey=1311768467463790320", ".")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("custom magic build failed: %v\n%s", err, out)
 	}
-	if out, err := testenv.Command(t, exe).CombinedOutput(); err != nil {
+	out, err := testenv.Command(t, exe).CombinedOutput()
+	if err != nil {
 		t.Fatalf("custom magic run failed: %v\n%s", err, out)
+	}
+	if got := string(out); !strings.HasPrefix(got, "obf.src.") || strings.Contains(got, "magicfixture") {
+		t.Fatalf("runtime source filename = %q; want anonymous pclntab filename", got)
 	}
 }
 

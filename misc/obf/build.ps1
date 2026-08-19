@@ -13,6 +13,8 @@ param(
     [switch]$KeepPclnNames,
     [switch]$NoObfuscateEntryOff,
     [switch]$NoObfuscateMagic,
+    [switch]$NoRandomizeLayout,
+    [switch]$NoObfuscateFileNames,
     [switch]$KeepSymbols
 )
 
@@ -79,6 +81,39 @@ function Get-ObfPclnMagic {
     return $magic
 }
 
+function Get-ObfLayoutSeed {
+    param([string]$Value)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("layout/" + $Value))
+    } finally {
+        $sha.Dispose()
+    }
+    $seed = [uint64][BitConverter]::ToUInt64($digest, 0)
+    $seed = $seed % [uint64]9223372036854775807
+    if ($seed -eq 0) {
+        $seed = [uint64]1
+    }
+    return $seed
+}
+
+function Get-ObfFileNameKey {
+    param([string]$Value)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("filetab/" + $Value))
+    } finally {
+        $sha.Dispose()
+    }
+    $key = [uint64][BitConverter]::ToUInt64($digest, 0)
+    if ($key -eq 0) {
+        $key = [uint64]1
+    }
+    return $key
+}
+
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $go = Join-Path $root "bin\go.exe"
 if (-not (Test-Path -LiteralPath $go)) {
@@ -100,7 +135,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 }
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v8"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v10"
 }
 $Cache = [System.IO.Path]::GetFullPath($Cache)
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -149,6 +184,14 @@ try {
         $magic = Get-ObfPclnMagic -Value $Seed
         $ldflags += @("-obfmagic", "-obfmagicvalue=$magic")
     }
+    if (-not $NoRandomizeLayout) {
+        $layoutSeed = Get-ObfLayoutSeed -Value $Seed
+        $ldflags += "-randlayout=$layoutSeed"
+    }
+    if (-not $NoObfuscateFileNames) {
+        $fileNameKey = Get-ObfFileNameKey -Value $Seed
+        $ldflags += @("-obffilenames", "-obffilenamekey=$fileNameKey")
+    }
     if ($ldflags.Count -gt 0) {
         $args += "-ldflags=$($ldflags -join ' ')"
     }
@@ -161,6 +204,8 @@ try {
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
     Write-Host "pclntab:  $(if ($NoObfuscateMagic) { 'standard-magic' } else { 'seed-magic' })"
+    Write-Host "layout:   $(if ($NoRandomizeLayout) { 'stable' } else { 'seed-randomized' })"
+    Write-Host "files:    $(if ($NoObfuscateFileNames) { 'original' } else { 'hashed-pclntab' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     & $go @args
     $stopwatch.Stop()

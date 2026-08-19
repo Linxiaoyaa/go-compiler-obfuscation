@@ -115,6 +115,8 @@ var (
 	flagObfEntryKey   = flag.Uint64("obfentrykey", 0, "32-bit key for encoded runtime function entry offsets")
 	flagObfPclnMagic  = flag.Bool("obfmagic", false, "use a custom runtime pclntab magic value")
 	flagObfMagicValue = flag.Uint64("obfmagicvalue", 0, "32-bit value for custom runtime pclntab magic")
+	flagObfFileNames  = flag.Bool("obffilenames", false, "replace runtime pclntab source file names with deterministic hashes")
+	flagObfFileKey    = flag.Uint64("obffilenamekey", 0, "64-bit key for hashed runtime pclntab source file names")
 	flagAllErrors     = flag.Bool("e", false, "no limit on number of errors reported")
 	cpuprofile        = flag.String("cpuprofile", "", "write cpu profile to `file`")
 	memprofile        = flag.String("memprofile", "", "write memory profile to `file`")

@@ -1,4 +1,4 @@
-# Go protection compiler v3.4 (String v2 + hardened pclntab)
+# Go protection compiler v3.6 (String v2 + hardened pclntab/layout)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -40,6 +40,10 @@ By default the linker also encodes every `_func.entryOff` with a seed-derived od
 
 The linker also uses a seed-derived `pclntab` magic for protected executable/PIE builds and patches the matching runtime verifier value. This prevents tools that assume the stock Go magic from recognizing the table immediately. Use `-NoObfuscateMagic` for a standard-magic diagnostic build.
 
+Protected builds also pass a seed-derived value to the linker's existing function-layout randomizer. The final text order is reproducible for a fixed seed and changes when the seed changes. Use `-NoRandomizeLayout` when profiling or comparing stable addresses.
+
+The runtime `pclntab.filetab` entries are replaced with deterministic `obf.src.<hash>` names derived from the seed and full source path. This hides source file paths from runtime stack metadata while preserving line numbers. The transformation is limited to `pclntab`; DWARF paths remain available when `-KeepSymbols` is used. Pass `-NoObfuscateFileNames` to retain original runtime file names.
+
 This is deliberately narrower than the full Garble source transformer: it does not rewrite exported APIs, struct fields, package paths, or reflection-visible identifiers. That boundary keeps ordinary cross-package Go builds and interface dispatch compatible while the protected implementation symbols are hidden.
 
 ## String literals
@@ -74,4 +78,4 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
   -ScanPlaintext @('literal-that-must-not-appear')
 ```
 
-The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, encodes function entry offsets, customizes the pclntab magic, and uses a dedicated V8 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, or `-NoObfuscateMagic` to retain the standard pclntab magic. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, randomizes function layout, and uses a dedicated V10 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
