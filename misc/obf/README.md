@@ -79,3 +79,36 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
 ```
 
 The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, randomizes function layout, and uses a dedicated V10 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+
+### Build profiles and independent verification
+
+Pass `-Report <path>` to write a `go-obf-profile/v1` JSON profile after a successful build. The profile records the compiler and final pattern, protection modes, artifact size/hash/elapsed time, marker offsets/counts, parsed `OBFREPORT` summaries, and digest-only plaintext scan results. The raw seed is never written to the profile. Relative `-Out`, `-Report`, and `-Cache` paths resolve against the caller's current directory. A failed compiler invocation or plaintext scan removes any previous report and does not create a success profile.
+
+```powershell
+$build = 'D:\Projection\GoProject\go-compiler\misc\obf\build.ps1'
+& $build `
+  -Package . `
+  -Out .\dist\app-protected.exe `
+  -Report .\dist\app-protected.profile.json `
+  -Pattern 'example.com/module/...' `
+  -ScanPlaintext @('literal-that-must-not-appear')
+
+& 'D:\Projection\GoProject\go-compiler\misc\obf\verify.ps1' `
+  -Artifact .\dist\app-protected.exe `
+  -Profile .\dist\app-protected.profile.json `
+  -ExpectedAbsent @('literal-that-must-not-appear')
+```
+
+`verify.ps1` emits one machine-readable JSON result and exits `0` only when every applicable check passes. It independently checks the profile schema, artifact path/size/SHA-256, hidden or retained protected names, hashed pclntab source names, the recorded pclntab magic, the encoded entry-key marker, and any `-ForbiddenText`/`-ExpectedAbsent` values. Function-name checks use the compiler's `name=hash-v1` report marker, so exported APIs that intentionally retain stable names are recorded as compatibility skips. The profile stores only hashes for build-time plaintext scans, so pass those values again when the verifier must rescan them; without them the result marks that check as `skip` instead of claiming an independent scan. A mismatched artifact or profile exits `1`; a missing/invalid profile or artifact exits `2`.
+
+For CI, make the verifier a separate step so a changed executable cannot reuse an old successful build result:
+
+```powershell
+& $build -Package . -Out $env:CI_ARTIFACT -Report $env:CI_PROFILE -Seed $env:OBF_SEED
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& 'D:\Projection\GoProject\go-compiler\misc\obf\verify.ps1' `
+  -Artifact $env:CI_ARTIFACT `
+  -Profile $env:CI_PROFILE `
+  -ExpectedAbsent $env:OBF_FORBIDDEN_TEXT
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
