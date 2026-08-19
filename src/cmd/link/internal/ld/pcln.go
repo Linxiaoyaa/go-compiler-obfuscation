@@ -401,25 +401,22 @@ func (ctxt *Link) configureObfEntryOff() {
 }
 
 func (ctxt *Link) configureObfPclnMagic() {
-	magic := uint32(abi.CurrentPCLnTabMagic)
-	if *flagObfPclnMagic {
-		if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
-			Exitf("-obfmagic is supported only for executable and PIE builds")
-		}
-		if *flagObfMagicValue == 0 || *flagObfMagicValue > uint64(^uint32(0)) {
-			Exitf("-obfmagicvalue must be a non-zero 32-bit value")
-		}
-		magic = uint32(*flagObfMagicValue)
-		if !isObfuscatedPclnMagic(magic) {
-			Exitf("-obfmagicvalue must differ from the standard pclntab magic values")
-		}
+	if !*flagObfPclnMagic {
+		return
+	}
+	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
+		Exitf("-obfmagic is supported only for executable and PIE builds")
+	}
+	if *flagObfMagicValue == 0 || *flagObfMagicValue > uint64(^uint32(0)) {
+		Exitf("-obfmagicvalue must be a non-zero 32-bit value")
+	}
+	magic := uint32(*flagObfMagicValue)
+	if !isObfuscatedPclnMagic(magic) {
+		Exitf("-obfmagicvalue must differ from the standard pclntab magic values")
 	}
 	sym := ctxt.loader.Lookup(obfPclnMagicSym, 0)
 	if sym == 0 {
-		if *flagObfPclnMagic {
-			Exitf("-obfmagic requires %s", obfPclnMagicSym)
-		}
-		return
+		Exitf("-obfmagic requires %s", obfPclnMagicSym)
 	}
 	updater := ctxt.loader.MakeSymbolUpdater(sym)
 	if updater.Size() < 4 {
