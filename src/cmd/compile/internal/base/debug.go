@@ -65,6 +65,8 @@ type DebugFlags struct {
 	ObfSeed               string `help:"deterministic seed for protection transformations" concurrent:"ok"`
 	ObfSeedEnv            string `help:"read the protection seed from this environment variable when obfseed is empty" concurrent:"ok"`
 	ObfSeedID             string `help:"non-secret protection seed identity used to separate compiler cache entries" concurrent:"ok"`
+	ObfRuntimeCheck       int    `help:"insert runtime linker-integrity gates in protected functions" concurrent:"ok"`
+	ObfV4Budget           int    `help:"maximum estimated VM v4 dispatcher growth per protected function" concurrent:"ok"`
 	PCTab                 string `help:"print named pc-value table\nOne of: pctospadj, pctofile, pctoline, pctoinline, pctopcdata"`
 	Panic                 int    `help:"show all compiler panics"`
 	Reshape               int    `help:"print information about expression reshaping"`

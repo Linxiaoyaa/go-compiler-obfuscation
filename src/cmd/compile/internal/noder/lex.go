@@ -89,6 +89,8 @@ func protectionFlag(verb string) ir.ProtectionFlag {
 		return ir.ProtectVirtualize
 	case "go:noprotect":
 		return ir.ProtectExclude
+	case "go:ephemeral":
+		return ir.ProtectEphemeral
 	}
 	return 0
 }

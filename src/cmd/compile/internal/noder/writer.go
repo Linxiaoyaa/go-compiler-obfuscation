@@ -1066,9 +1066,25 @@ func (w *writer) funcExt(obj *types2.Func) {
 	if pragma&ir.Systemstack != 0 && pragma&ir.Nosplit != 0 {
 		w.p.errorf(decl, "go:nosplit and go:systemstack cannot be combined")
 	}
-	const activeProtection = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize
+	const activeProtection = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral
 	if protection&ir.ProtectExclude != 0 && protection&activeProtection != 0 {
-		w.p.errorf(decl, "go:noprotect cannot be combined with go:obf, go:encrypt, or go:vm")
+		w.p.errorf(decl, "go:noprotect cannot be combined with active protection directives")
+	}
+	if protection&ir.ProtectEphemeral != 0 && protection&ir.ProtectEncrypt == 0 {
+		w.p.errorf(decl, "go:ephemeral requires go:encrypt")
+	}
+	if protection&ir.ProtectEphemeral != 0 && protection&ir.ProtectVirtualize != 0 {
+		w.p.errorf(decl, "go:ephemeral cannot be combined with go:vm")
+	}
+	if protection&ir.ProtectEphemeral != 0 {
+		sig := obj.Type().(*types2.Signature)
+		for i := 0; i < sig.Results().Len(); i++ {
+			basic, ok := sig.Results().At(i).Type().Underlying().(*types2.Basic)
+			if ok && basic.Info()&types2.IsString != 0 {
+				w.p.errorf(decl, "go:ephemeral functions cannot return string values")
+				break
+			}
+		}
 	}
 	if decl.Body == nil && protection != 0 {
 		w.p.errorf(decl, "protection directives require a Go function body")

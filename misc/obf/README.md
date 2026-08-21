@@ -1,4 +1,4 @@
-# Go protection compiler v3.7 (release integrity + protected seed transport)
+# Go protection compiler v3.8 (release provenance + bounded VM v4)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -26,6 +26,7 @@ func exportedBridge(a, b uint64) uint64 {
 - `//go:obf`: inserts an opaque control-flow diamond for native (non-VM) functions.
 - `//go:encrypt`: encodes live `uint64` constants and encrypts non-empty string literals in marked non-VM functions.
 - `//go:vm`: translates supported pure SSA into a per-function register-threaded VM v3 dispatcher.
+- `//go:ephemeral`: combines with `//go:encrypt` for a short-lived string literal. The function cannot return string values; the compiler proves that decoded storage stays local and inserts a wipe on every normal return. A runtime cleanup remains for the exceptional GC path.
 - `//go:noprotect`: explicitly excludes the function and cannot be combined with the other directives.
 
 Protected functions are automatically excluded from inlining. Explicit directives are strict: unsupported functions fail compilation instead of silently losing protection.
@@ -56,6 +57,8 @@ Functions that also contain control flow or memory operations, such as map and c
 
 The returned Go string remains plaintext for as long as the program retains it; the runtime cannot erase a still-live immutable string without breaking program semantics. Keep sensitive strings scoped to the operation that consumes them and avoid storing them in globals or long-lived objects. If the same literal also appears in an unprotected function or global initializer, that unprotected occurrence can still place plaintext in the binary.
 
+String v3 is selected by `//go:ephemeral` and uses separate derivation and ciphertext domains. It rejects values that escape through a return, heap store, call, interface, map, channel, or global. The directive is deliberately explicit because the compiler cannot infer a universally safe last use for an immutable Go string.
+
 ## VM v3 boundary
 
 VM v3 accepts pure functions with at least one `uint64` argument and one scalar result (`uint64` or `bool`). It preserves multiple plain/conditional blocks, loops, and Phi values by assigning virtual registers on dispatcher edges. Supported operations are arguments, `uint64` constants, copy, add, subtract, multiply, bitwise AND/OR/XOR, left shift by `uint64`, unsigned right shift by `uint64`, negate, complement, equality/inequality, unsigned less-than/less-or-equal, boolean AND/OR/equality/inequality/NOT, and conditional select.
@@ -63,6 +66,10 @@ VM v3 accepts pure functions with at least one `uint64` argument and one scalar 
 VM v3 fuses up to eight consecutive pure calculations into seed-dependent super-instructions before installing the dispatcher. Safe jump and return terminators may share the final handler; conditional terminators stay separate so short-circuit and Phi-result semantics remain exact. States are balanced across 1, 2, 4, or 8 dispatch buckets, and each bucket independently shuffles real and decoy checks. This replaces the single recognizable linear state chain while reducing state, check, and handler counts. `-d=obfseed=<seed>` reproduces a build; changing the seed changes fusion widths, bucket membership, check order, decoy states, encoded constants, string key lanes, ciphertext, and decoder selection.
 
 `-d=obfreport=1` emits one `OBFREPORT` line per marked function. VM v3 reports source instruction count, fused state count, terminal fusions, bucket/check/decoy counts, and pre/post CFG shape. String v2 is reported as `encrypt=str-runtime-v2`. The build script prints total elapsed build time.
+
+VM v4 retains the v3 register dispatcher and adds a bounded number of independently seeded alias checks. `-VMBudget` (or `-d=obfv4budget`) caps estimated dispatcher growth; reports include `aliases=` and `budget=` so the verifier can enforce a minimum without allowing unbounded compile-time expansion.
+
+Protected release builds also inject a `runtime=entry-v1` gate at every protected function entry. The gate verifies the linker-populated entry-offset key, custom `pclntab` magic, and module header against a function-local seal derived from the build seed. It detects inconsistent or modified linker metadata before protected work begins. The normal build path enables it automatically; `-NoRuntimeChecks` disables it, and diagnostic builds that use `-NoObfuscateEntryOff` or `-NoObfuscateMagic` disable it because those options intentionally remove part of the bound runtime state.
 
 Pointer-bearing registers, signed/narrow integer conversions, multiple returns, memory operations, calls, interfaces, `defer`, `panic/recover`, jump tables, and strings remain outside the VM boundary. String literals are supported by `//go:encrypt` only on the native non-VM path. An explicitly marked function that crosses the VM boundary fails compilation with a diagnostic; it is never silently emitted without the requested VM transform.
 
@@ -78,11 +85,11 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
   -ScanPlaintext @('literal-that-must-not-appear')
 ```
 
-The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, randomizes function layout, and uses a dedicated V10 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, enables entry integrity checks, randomizes function layout, and uses a dedicated V10 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRuntimeChecks` to remove entry gates, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
 
 ### Build profiles and independent verification
 
-Pass `-Report <path>` to write a `go-obf-profile/v1` JSON profile after a successful build. The profile records the compiler version, binary hash and source revision, target tuple, final pattern, protection modes, artifact size/hash/elapsed time, marker offsets/counts, parsed `OBFREPORT` summaries, and digest-only plaintext scan results. The raw seed is never written to the profile or compiler command line when the default environment-seed path is used. Relative `-Out`, `-Report`, `-Cache`, and `-SeedFile` paths resolve against the caller's current directory. The linker output and profile are prepared in same-directory temporary files and published only after compilation and plaintext scans succeed. A failed build removes temporary files while leaving an existing artifact/profile pair untouched; replacing an existing artifact uses the platform's atomic file-replacement primitive and keeps a rollback copy until the matching profile is published.
+Pass `-Report <path>` to write a `go-obf-profile/v2` JSON profile after a successful build. The profile records the compiler version, binary hash, source-tree digest and revision, target tuple, final pattern, protection modes, artifact size/hash/elapsed time, marker offsets/counts, parsed `OBFREPORT` summaries, and digest-only plaintext/metadata scan results. Pass `-Manifest <path>` to additionally write a `go-obf-release-manifest/v1` record binding artifact/profile/compiler/source/target/seed fingerprints. The profile and manifest also bind the build, verification, matrix, and integrity-test scripts by SHA-256. The raw seed is never written to the profile or compiler command line when the default environment-seed path is used. Relative `-Out`, `-Report`, `-Manifest`, `-Cache`, and `-SeedFile` paths resolve against the caller's current directory. The linker output, profile, and manifest are prepared in same-directory temporary files and published only after compilation and scans succeed.
 
 Seed input precedence is `-Seed`, then `-SeedFile`, then the environment variable named by `-SeedEnv` (default `GO_OBF_SEED`), then a generated random seed. For release builds prefer `-SeedFile` or `GO_OBF_SEED`; the script prints only a SHA-256 fingerprint by default. `-ShowSeed` is intended for local diagnostics and restores the raw value in console output. The compiler receives the seed through `-d=obfseedenv=GO_OBF_SEED`; `obfseedid=<fingerprint>` separates build-cache entries without exposing the seed in compiler arguments.
 
@@ -92,12 +99,19 @@ $build = 'D:\Projection\GoProject\go-compiler\misc\obf\build.ps1'
   -Package . `
   -Out .\dist\app-protected.exe `
   -Report .\dist\app-protected.profile.json `
+  -Manifest .\dist\app-protected.manifest.json `
   -Pattern 'example.com/module/...' `
-  -ScanPlaintext @('literal-that-must-not-appear')
+  -ScanPlaintext @('literal-that-must-not-appear') `
+  -ScanMetadata @('source-root-or-build-marker')
 
 & 'D:\Projection\GoProject\go-compiler\misc\obf\verify.ps1' `
   -Artifact .\dist\app-protected.exe `
   -Profile .\dist\app-protected.profile.json `
+  -Manifest .\dist\app-protected.manifest.json `
+  -CompilerPath 'D:\Projection\GoProject\go-compiler\bin\tool\windows_amd64\compile.exe' `
+  -CompilerRoot 'D:\Projection\GoProject\go-compiler' `
+  -RequireCompilerBinary -RequireCompilerSource -RequireRuntimeChecks `
+  -ForbiddenMetadata @('source-root-or-build-marker') `
   -ExpectedAbsent @('literal-that-must-not-appear')
 ```
 
@@ -122,6 +136,18 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 `verify.ps1` emits one machine-readable JSON result and exits `0` only when every applicable check passes. It independently checks the profile schema, artifact path/size/SHA-256, optional externally supplied artifact/compiler/seed fingerprints, required function coverage, hidden or retained protected names, hashed pclntab source names, the recorded pclntab magic, the encoded entry-key marker, and any `-ForbiddenText`/`-ExpectedAbsent` values. Function-name checks use the compiler's `name=hash-v1` report marker, so exported APIs that intentionally retain stable names are recorded as compatibility skips. The profile stores only hashes for build-time plaintext scans, so pass those values again when the verifier must rescan them; without them the result marks that check as `skip` instead of claiming an independent scan. A mismatched artifact or profile exits `1`; a missing/invalid profile or artifact exits `2`.
+
+`test-integrity.ps1` exercises the release verifier against an untouched copied record plus seven intentional changes: artifact bytes, a self-consistent residual metadata insertion, manifest artifact hash, compiler binary hash, compiler source digest, seed fingerprint, and the declared runtime-check mode. It expects each modified case to fail on its named verifier check, then exits `0` only when the complete negative suite behaves as expected.
+
+```powershell
+$profile = Get-Content .\dist\app-protected.profile.json -Raw | ConvertFrom-Json
+& 'D:\Projection\GoProject\go-compiler\misc\obf\test-integrity.ps1' `
+  -Artifact .\dist\app-protected.exe `
+  -Profile .\dist\app-protected.profile.json `
+  -Manifest .\dist\app-protected.manifest.json `
+  -CompilerPath $profile.compiler.path `
+  -CompilerRoot 'D:\Projection\GoProject\go-compiler'
+```
 
 For CI, make the verifier a separate step so a changed executable cannot reuse an old successful build result:
 

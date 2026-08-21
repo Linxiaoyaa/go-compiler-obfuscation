@@ -12,6 +12,120 @@ import "unsafe"
 
 type obfStringKeyV2 [4]uint64
 
+const (
+	obfStringV3HeaderSize = uintptr(16)
+	obfStringV3Cookie     = uintptr(0x9e3779b97f4a7c15)
+)
+
+type obfStringHeaderV3 struct {
+	length uintptr
+	cookie uintptr
+}
+
+func obfStringAllocV3(src *byte, n int, key *obfStringKeyV2, decoder uint8) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	// Stay out of the tiny allocator so the finalizer is tied to this
+	// plaintext allocation rather than a shared allocation slot.
+	allocationSize := obfStringV3HeaderSize + uintptr(n)
+	if allocationSize < maxTinySize {
+		allocationSize = maxTinySize
+	}
+	p := mallocgc(allocationSize, nil, false)
+	header := (*obfStringHeaderV3)(p)
+	header.length = uintptr(n)
+	header.cookie = uintptr(n) ^ obfStringV3Cookie
+	data := add(p, obfStringV3HeaderSize)
+	dst := unsafe.Slice((*byte)(data), n)
+	srcp := unsafe.Pointer(src)
+	for i := 0; i < n; i++ {
+		dst[i] = *(*byte)(add(srcp, uintptr(i))) ^ obfStringMaskV3(*key, decoder, i)
+	}
+	SetFinalizer(header, obfStringFinalizeV3)
+	obfStringWipeV2(key)
+	return (*byte)(data), n
+}
+
+func obfStringMaskV3(key obfStringKeyV2, decoder uint8, offset int) byte {
+	i := uint64(offset)
+	a, b, c, d := key[0], key[1], key[2], key[3]
+	var x uint64
+	switch decoder & 3 {
+	case 0:
+		x = a + i*0x9e3779b97f4a7c15
+		x ^= rotateObf64(b^i, uint(i&63))
+		x += c ^ (d + i*0xd1b54a32d192ed03)
+	case 1:
+		x = b + i*0xd1b54a32d192ed03
+		x ^= rotateObf64(c+i, uint((i+17)&63))
+		x += d ^ (a + i*0x9e3779b97f4a7c15)
+	case 2:
+		x = c + i*0x94d049bb133111eb
+		x ^= rotateObf64(d^i, uint((i+31)&63))
+		x += a ^ (b + i*0xbf58476d1ce4e5b9)
+	default:
+		x = d + i*0xbf58476d1ce4e5b9
+		x ^= rotateObf64(a+i, uint((i+47)&63))
+		x += b ^ (c + i*0x94d049bb133111eb)
+	}
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return byte(x >> uint((i&7)*8))
+}
+
+//go:noinline
+func obfStringDataV3A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	return obfStringAllocV3(src, n, &key, 0)
+}
+
+//go:noinline
+func obfStringDataV3B(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	return obfStringAllocV3(src, n, &key, 1)
+}
+
+//go:noinline
+func obfStringDataV3C(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	return obfStringAllocV3(src, n, &key, 2)
+}
+
+//go:noinline
+func obfStringDataV3D(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	return obfStringAllocV3(src, n, &key, 3)
+}
+
+//go:noinline
+func obfStringWipeV3(ptr *byte, n int) {
+	if ptr == nil || n <= 0 {
+		return
+	}
+	header := (*obfStringHeaderV3)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) - obfStringV3HeaderSize))
+	if header.length != uintptr(n) || header.cookie != (uintptr(n)^obfStringV3Cookie) {
+		return
+	}
+	SetFinalizer(header, nil)
+	memclrNoHeapPointers(unsafe.Pointer(ptr), uintptr(n))
+	header.length = 0
+	header.cookie = 0
+	KeepAlive(ptr)
+}
+
+func obfStringFinalizeV3(header *obfStringHeaderV3) {
+	if header == nil || header.cookie != (header.length^obfStringV3Cookie) || header.length == 0 {
+		return
+	}
+	memclrNoHeapPointers(add(unsafe.Pointer(header), obfStringV3HeaderSize), header.length)
+	header.length = 0
+	header.cookie = 0
+}
+
 //go:noinline
 func obfStringDataV2A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
 	if n <= 0 {

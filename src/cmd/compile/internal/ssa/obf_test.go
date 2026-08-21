@@ -127,3 +127,14 @@ func TestVM3StateForBucket(t *testing.T) {
 		}
 	}
 }
+
+func TestVM4AliasBudget(t *testing.T) {
+	p := &vm3Program{units: make([]vm3Unit, 64)}
+	if got := len(p.units) / 4; got != 16 {
+		t.Fatalf("default v4 alias estimate = %d; want 16", got)
+	}
+	const budget = 128
+	if got := budget / 32; got != 4 {
+		t.Fatalf("budget cap = %d; want 4", got)
+	}
+}

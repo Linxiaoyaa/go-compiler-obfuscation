@@ -335,7 +335,7 @@ func InlineImpossible(fn *ir.Func) string {
 	}
 
 	// If marked "go:noinline", don't inline.
-	if fn.Pragma&ir.Noinline != 0 || fn.Protection&(ir.ProtectObfuscate|ir.ProtectEncrypt|ir.ProtectVirtualize) != 0 {
+	if fn.Pragma&ir.Noinline != 0 || fn.Protection&(ir.ProtectObfuscate|ir.ProtectEncrypt|ir.ProtectVirtualize|ir.ProtectEphemeral) != 0 {
 		reason = "marked noinline or protected"
 		return reason
 	}

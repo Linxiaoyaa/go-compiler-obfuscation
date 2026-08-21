@@ -37,6 +37,41 @@ func ObfStringDataV2ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64) [
 	return unsafe.Slice(p, n)
 }
 
+// ObfStringDataV3ForTest returns snapshots before and after the explicit wipe.
+func ObfStringDataV3ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64) (before, after []byte) {
+	if len(ciphertext) == 0 {
+		return nil, nil
+	}
+	var p *byte
+	var n int
+	switch decoder & 3 {
+	case 0:
+		p, n = obfStringDataV3A(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	case 1:
+		p, n = obfStringDataV3B(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	case 2:
+		p, n = obfStringDataV3C(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	default:
+		p, n = obfStringDataV3D(&ciphertext[0], len(ciphertext), lanes[0], lanes[1], lanes[2], lanes[3])
+	}
+	data := unsafe.Slice(p, n)
+	before = append([]byte(nil), data...)
+	obfStringWipeV3(p, n)
+	after = append([]byte(nil), data...)
+	return before, after
+}
+
+// ObfRuntimeGuardSealForTest exposes the deterministic guard seal calculation.
+func ObfRuntimeGuardSealForTest(tag uint64, entryKey, magic uint32) uint64 {
+	return obfRuntimeGuardSealV1(tag, entryKey, magic)
+}
+
+// ObfRuntimeGuardValidForTest checks the runtime guard logic without taking
+// the production fatal path.
+func ObfRuntimeGuardValidForTest(tag, seal uint64, entryKey, magic, headerMagic uint32) bool {
+	return obfRuntimeGuardValidV1(tag, seal, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic))
+}
+
 var Fadd64 = fadd64
 var Fsub64 = fsub64
 var Fmul64 = fmul64

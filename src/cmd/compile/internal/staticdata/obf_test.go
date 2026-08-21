@@ -77,6 +77,17 @@ func TestObfuscatedStringKeyV2DecoderCoverage(t *testing.T) {
 	}
 }
 
+func TestObfuscatedStringKeyV3SeparateDomain(t *testing.T) {
+	v2 := obfuscatedStringKeyV2("pkg.fn", "seed-a", "literal-a")
+	v3 := obfuscatedStringKeyV3("pkg.fn", "seed-a", "literal-a")
+	if v2 == v3 {
+		t.Fatal("String v3 reused the String v2 key domain")
+	}
+	if again := obfuscatedStringKeyV3("pkg.fn", "seed-a", "literal-a"); again != v3 {
+		t.Fatalf("String v3 is not deterministic: %#v != %#v", again, v3)
+	}
+}
+
 func BenchmarkObfuscatedStringKeyV2(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		obfuscatedStringKeyV2Sink = obfuscatedStringKeyV2(

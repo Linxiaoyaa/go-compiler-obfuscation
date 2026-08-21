@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize
+const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral
 
 type vmOpcode uint8
 
@@ -129,6 +129,9 @@ func protectionFlagsString(flags ir.ProtectionFlag) string {
 	if flags&ir.ProtectVirtualize != 0 {
 		names = append(names, "vm")
 	}
+	if flags&ir.ProtectEphemeral != 0 {
+		names = append(names, "ephemeral")
+	}
 	if flags&ir.ProtectExclude != 0 {
 		names = append(names, "noprotect")
 	}
@@ -171,21 +174,43 @@ func obfVirtualize(f *Func) {
 		protectionError(f, "vm", "%v", err)
 		return
 	}
-	if err := installVM3Program(f, vm3, flags&ir.ProtectEncrypt != 0); err != nil {
+	budget := base.Debug.ObfV4Budget
+	if budget <= 0 {
+		budget = 2048
+	}
+	aliases := len(vm3.units) / 4
+	if aliases < 1 && len(vm3.units) > 1 {
+		aliases = 1
+	}
+	if aliases > budget/32 {
+		aliases = budget / 32
+	}
+	if aliases < 0 {
+		aliases = 0
+	}
+	if err := installVM4Program(f, vm3, flags&ir.ProtectEncrypt != 0, aliases, budget); err != nil {
 		protectionError(f, "vm", "%v", err)
+		return
+	}
+	runtimeCheck, err := installRuntimeGuard(f)
+	if err != nil {
+		protectionError(f, "runtimecheck", "%v", err)
 		return
 	}
 	afterBlocks, afterValues := protectionShape(f)
 
-	applied := fmt.Sprintf("vm=register-threaded-v3 instructions=%d states=%d fused=%d terminal-fused=%d registers=%d source-blocks=%d branches=%d buckets=%d checks=%d decoys=%d cfg-blocks=%d->%d cfg-values=%d->%d",
+	applied := fmt.Sprintf("vm=register-threaded-v4 instructions=%d states=%d fused=%d terminal-fused=%d registers=%d source-blocks=%d branches=%d buckets=%d checks=%d decoys=%d aliases=%d budget=%d cfg-blocks=%d->%d cfg-values=%d->%d",
 		len(program.instructions), len(vm3.units), vm3.fused, vm3.terminalFused, len(program.registers), len(program.blocks), program.branches,
-		vm3.buckets, vm3.checks, vm3.decoys, beforeBlocks, afterBlocks, beforeValues, afterValues)
+		vm3.buckets, vm3.checks, vm3.decoys, vm3.aliases, budget, beforeBlocks, afterBlocks, beforeValues, afterValues)
 	if flags&ir.ProtectEncrypt != 0 {
 		applied += " encrypt=const64-state-v3"
 	}
 	applied += " dispatch=bucketed-islands-v1"
 	if flags&ir.ProtectObfuscate != 0 {
 		applied += " obf=vm-dispatch-v3"
+	}
+	if runtimeCheck {
+		applied += " runtime=entry-v1"
 	}
 	reportProtection(f, flags, applied)
 }
@@ -231,7 +256,11 @@ func obfHarden(f *Func) {
 			}
 		}
 		if stringProtected {
-			applied = append(applied, "encrypt=str-runtime-v2")
+			if flags&ir.ProtectEphemeral != 0 {
+				applied = append(applied, "encrypt=str-runtime-v3-ephemeral")
+			} else {
+				applied = append(applied, "encrypt=str-runtime-v2")
+			}
 		}
 	}
 	if flags&ir.ProtectObfuscate != 0 {
@@ -241,7 +270,92 @@ func obfHarden(f *Func) {
 		}
 		applied = append(applied, "obf=bcf-v1")
 	}
+	if runtimeCheck, err := installRuntimeGuard(f); err != nil {
+		protectionError(f, "runtimecheck", "%v", err)
+		return
+	} else if runtimeCheck {
+		applied = append(applied, "runtime=entry-v1")
+	}
 	reportProtection(f, flags, strings.Join(applied, " "))
+}
+
+// installRuntimeGuard emits a memory-ordered entry call after the protection
+// transforms have settled. It deliberately uses the linker metadata already
+// required by a protected executable, rather than introducing a process-wide
+// plaintext key or mutable runtime cache.
+func installRuntimeGuard(f *Func) (bool, error) {
+	if base.Debug.ObfRuntimeCheck == 0 {
+		return false, nil
+	}
+	if base.Debug.ObfSeed == "" {
+		return false, fmt.Errorf("runtime checks require a protection seed")
+	}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall && v.Op != OpStaticLECall {
+				continue
+			}
+			aux, ok := v.Aux.(*AuxCall)
+			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") {
+				return false, nil
+			}
+		}
+	}
+
+	entry := f.Entry
+	var initMem *Value
+	for _, v := range entry.Values {
+		if v.Op == OpInitMem {
+			initMem = v
+			break
+		}
+	}
+	if initMem == nil {
+		return false, fmt.Errorf("could not find entry memory")
+	}
+
+	tag, seal := base.ObfRuntimeGuardV1Values(base.Debug.ObfSeed, protectionFunctionName(f))
+	rng := newProtectionRNGDomain(f, "runtime-guard")
+	sp := entry.NewValue0(entry.Pos, OpSP, f.Config.Types.Uintptr)
+	source := entry.NewValue2(entry.Pos, OpConvert, f.Config.Types.UInt64, sp, initMem)
+	zero := opaqueZero64(entry, source)
+	tagValue := runtimeGuardConstant(entry, entry.Pos, tag, rng, zero)
+	sealValue := runtimeGuardConstant(entry, entry.Pos, seal, rng, zero)
+	argTypes := []*types.Type{f.Config.Types.UInt64, f.Config.Types.UInt64}
+	aux := StaticAuxCall(f.fe.Syslook("obfRuntimeGuardV1"), f.ABIDefault.ABIAnalyzeTypes(argTypes, nil))
+	call := entry.NewValue0A(entry.Pos, OpStaticCall, types.TypeResultMem, aux)
+	call.AddArgs(tagValue, sealValue, initMem)
+	call.AuxInt = aux.ArgWidth()
+	guardMem := entry.NewValue1I(entry.Pos, OpSelectN, types.TypeMem, 0, call)
+
+	// Every existing memory chain starts at initMem. Re-rooting direct users on
+	// the guard result makes the check execute before a protected function can
+	// perform a load, store, call, or return.
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v == source || v == call || v == guardMem {
+				continue
+			}
+			for i, arg := range v.Args {
+				if arg == initMem {
+					v.SetArg(i, guardMem)
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
+func runtimeGuardConstant(b *Block, pos src.XPos, value uint64, rng *protectionRNG, zero *Value) *Value {
+	mask := rng.next()
+	if mask == 0 {
+		mask = 0x6a09e667f3bcc909
+	}
+	t := b.Func.Config.Types.UInt64
+	encoded := b.NewValue0I(pos, OpConst64, t, int64(value^mask))
+	key := b.NewValue0I(pos, OpConst64, t, int64(mask))
+	dynamicKey := b.NewValue2(pos, OpXor64, t, key, zero)
+	return b.NewValue2(pos, OpXor64, t, encoded, dynamicKey)
 }
 
 // hasObfuscatedStringCall recognizes the call emitted by ssagen for protected
@@ -254,7 +368,7 @@ func hasObfuscatedStringCall(f *Func) bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3")) {
 				return true
 			}
 		}
@@ -273,7 +387,7 @@ func obfuscatedStringKeyConstants(f *Func) map[*Value]bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if !ok || aux.Fn == nil || !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") {
+			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3")) {
 				continue
 			}
 			for _, arg := range v.Args {
@@ -1217,6 +1331,7 @@ type vm3Program struct {
 	buckets       int
 	checks        int
 	decoys        int
+	aliases       int
 	fused         int
 	terminalFused int
 }
@@ -1473,6 +1588,7 @@ type vm3CheckSpec struct {
 	state uint64
 	unit  int
 	decoy bool
+	alias bool
 }
 
 type vm3CheckNode struct {
@@ -1519,7 +1635,7 @@ func vm3EmitUnit(b *Block, p *vm3Program, unit *vm3Unit, regs []*Value, pc, zero
 	return changed, nil
 }
 
-func installVM3Program(f *Func, p *vm3Program, encrypt bool) error {
+func installVM4Program(f *Func, p *vm3Program, encrypt bool, aliasCount, budget int) error {
 	if p == nil || p.source == nil || len(p.units) == 0 || p.source.initMem == nil || p.source.sourceArg == nil || p.buckets <= 0 {
 		return fmt.Errorf("invalid v3 VM program")
 	}
@@ -1567,6 +1683,20 @@ func installVM3Program(f *Func, p *vm3Program, encrypt bool) error {
 		state := vm3StateForBucket(rng, seen, bucketKey, bucketMask, bucket)
 		checksByBucket[bucket] = append(checksByBucket[bucket], vm3CheckSpec{state: state, unit: -1, decoy: true})
 	}
+	if aliasCount > 0 {
+		if aliasCount > budget/32 {
+			aliasCount = budget / 32
+		}
+		if aliasCount < 0 {
+			aliasCount = 0
+		}
+		for i := 0; i < aliasCount; i++ {
+			unitIndex := stateOrder[(i*7)%len(stateOrder)]
+			bucket := unitBuckets[unitIndex]
+			state := vm3StateForBucket(rng, seen, bucketKey, bucketMask, bucket)
+			checksByBucket[bucket] = append(checksByBucket[bucket], vm3CheckSpec{state: state, unit: unitIndex, alias: true})
+		}
+	}
 	invalidState := vm3StateForBucket(rng, seen, bucketKey, bucketMask, 0)
 	for bucket := range checksByBucket {
 		vm3ShuffleChecks(checksByBucket[bucket], rng)
@@ -1574,7 +1704,8 @@ func installVM3Program(f *Func, p *vm3Program, encrypt bool) error {
 			return fmt.Errorf("v3 bucket %d has no checks", bucket)
 		}
 	}
-	p.checks = len(p.units) + decoyCount
+	p.aliases = aliasCount
+	p.checks = len(p.units) + decoyCount + aliasCount
 	p.decoys = decoyCount
 
 	dispatch := f.NewBlock(BlockPlain)

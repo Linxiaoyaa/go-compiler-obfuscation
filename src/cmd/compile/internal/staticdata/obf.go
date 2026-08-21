@@ -79,6 +79,18 @@ func ObfuscateProtectedFuncLinkname(fn *ir.Func, seed string) (string, bool) {
 // reversible literal spelling is carried in object metadata.
 func ObfuscatedStringSym(pos src.XPos, functionName, seed, text string) (*obj.LSym, ObfuscatedStringKey) {
 	key := obfuscatedStringKeyV2(functionName, seed, text)
+	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v2")
+}
+
+// ObfuscatedStringSymV3 emits ciphertext for an ephemeral protected literal.
+// Its derivation and symbol domain are separate from String v2 so changing the
+// lifetime policy also changes keys, ciphertext, and object identity.
+func ObfuscatedStringSymV3(pos src.XPos, functionName, seed, text string) (*obj.LSym, ObfuscatedStringKey) {
+	key := obfuscatedStringKeyV3(functionName, seed, text)
+	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v3")
+}
+
+func obfuscatedStringSym(pos src.XPos, text string, key ObfuscatedStringKey, symbolDomain string) (*obj.LSym, ObfuscatedStringKey) {
 	ciphertext := make([]byte, len(text))
 	for i := range ciphertext {
 		ciphertext[i] = text[i] ^ obfuscatedStringMaskV2(key.Lanes, key.Decoder, i)
@@ -86,7 +98,7 @@ func ObfuscatedStringSym(pos src.XPos, functionName, seed, text string) (*obj.LS
 
 	// Keep the symbol content-addressable, but derive its name from the
 	// ciphertext and the protection domain instead of exposing either directly.
-	digest := hashParts([]byte("go-obf-string-symbol-v2"), ciphertext)
+	digest := hashParts([]byte(symbolDomain), ciphertext)
 	name := "go:obfstr." + hex.EncodeToString(digest[:16])
 	sym := base.Ctxt.Lookup(name)
 	if !sym.OnList() {
@@ -95,6 +107,22 @@ func ObfuscatedStringSym(pos src.XPos, functionName, seed, text string) (*obj.LS
 		sym.Set(obj.AttrContentAddressable, true)
 	}
 	return sym, key
+}
+
+func obfuscatedStringKeyV3(functionName, seed, text string) ObfuscatedStringKey {
+	root := hashParts([]byte("go-obf-string-v3/root"), []byte(seed))
+	function := hashParts(root[:], []byte("function"), []byte(functionName))
+	literal := hashParts(function[:], []byte("ephemeral-literal"), []byte(text))
+	mask := hashParts(literal[:], []byte("ephemeral-mask"))
+
+	var key ObfuscatedStringKey
+	for i := range key.Lanes {
+		off := i * 8
+		key.Lanes[i] = binary.LittleEndian.Uint64(literal[off:off+8]) ^
+			binary.LittleEndian.Uint64(mask[off:off+8])
+	}
+	key.Decoder = (literal[1] ^ literal[17]) & 3
+	return key
 }
 
 func obfuscatedStringKeyV2(functionName, seed, text string) ObfuscatedStringKey {

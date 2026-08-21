@@ -36,6 +36,24 @@ func TestObfStringDataV2Empty(t *testing.T) {
 	}
 }
 
+func TestObfStringDataV3ExplicitWipe(t *testing.T) {
+	plain := []byte("string-v3-ephemeral-wipe")
+	lanes := [4]uint64{0x1234, 0x5678, 0x9abc, 0xdef0}
+	for decoder := 0; decoder < 4; decoder++ {
+		ciphertext := make([]byte, len(plain))
+		for i := range ciphertext {
+			ciphertext[i] = plain[i] ^ obfStringMaskForTest(lanes, uint8(decoder), i)
+		}
+		before, after := runtime.ObfStringDataV3ForTest(uint8(decoder), ciphertext, lanes)
+		if !bytes.Equal(before, plain) {
+			t.Fatalf("decoder %d before wipe = %q; want %q", decoder, before, plain)
+		}
+		if !bytes.Equal(after, make([]byte, len(after))) {
+			t.Fatalf("decoder %d retained plaintext bytes after wipe: %x", decoder, after)
+		}
+	}
+}
+
 func obfStringMaskForTest(lanes [4]uint64, decoder uint8, index int) byte {
 	i := uint64(index)
 	a, b, c, d := lanes[0], lanes[1], lanes[2], lanes[3]

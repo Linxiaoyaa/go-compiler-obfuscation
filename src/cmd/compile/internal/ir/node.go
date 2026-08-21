@@ -462,6 +462,7 @@ const (
 	ProtectEncrypt
 	ProtectVirtualize
 	ProtectExclude
+	ProtectEphemeral
 )
 
 var BlankNode *Name

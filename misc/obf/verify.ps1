@@ -5,15 +5,26 @@ param(
     [Parameter(Mandatory = $true, Position = 1)]
     [string]$Profile,
 
+    [string]$Manifest = "",
     [string]$ExpectedSha256 = "",
     [string]$ExpectedProfileSha256 = "",
+    [string]$ExpectedManifestSha256 = "",
     [string]$ExpectedSeedFingerprint = "",
     [string]$ExpectedCompilerSha256 = "",
+    [string]$ExpectedCompilerSourceSha256 = "",
     [string]$ExpectedCompilerCommit = "",
+    [string]$CompilerPath = "",
+    [string]$CompilerRoot = "",
+    [switch]$RequireCompilerBinary,
+    [switch]$RequireCompilerSource,
+    [switch]$RequireTooling,
     [switch]$RequireCleanCompiler,
+    [switch]$RequireRuntimeChecks,
     [string[]]$RequireFunction = @(),
     [int]$MinReportFunctions = -1,
+    [int]$MinV4Aliases = -1,
     [string[]]$ForbiddenText = @(),
+    [string[]]$ForbiddenMetadata = @(),
     [string[]]$ExpectedAbsent = @()
 )
 
@@ -90,6 +101,90 @@ function Get-Sha256Text {
     }
 }
 
+function Convert-BytesToHex {
+    param([byte[]]$Value)
+
+    return ([BitConverter]::ToString($Value).Replace("-", "")).ToLowerInvariant()
+}
+
+function Get-GitRevision {
+    param([string]$Directory)
+
+    try {
+        $value = @(& git -C $Directory rev-parse HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $value.Count -gt 0) {
+            return ([string]$value[0]).Trim()
+        }
+    } catch {
+    }
+    return ""
+}
+
+function Get-GitDirty {
+    param([string]$Directory)
+
+    try {
+        $value = @(& git -C $Directory status --porcelain --untracked-files=no 2>$null)
+        return $LASTEXITCODE -eq 0 -and $value.Count -gt 0
+    } catch {
+        return $null
+    }
+}
+
+function Get-CompilerSourceFiles {
+    param([string]$Directory)
+
+    $prefixes = @(
+        "src/cmd/compile/", "src/cmd/internal/", "src/cmd/link/",
+        "src/internal/abi/", "src/internal/buildcfg/", "src/internal/goarch/",
+        "src/internal/objabi/", "src/internal/pkgbits/", "src/internal/platform/",
+        "src/internal/runtime/", "src/runtime/"
+    )
+    $files = @(& git -C $Directory ls-files --cached --others --exclude-standard -- "src" 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-files failed for compiler source root: $Directory"
+    }
+    return @($files | ForEach-Object { ([string]$_).Replace("\", "/") } | Where-Object {
+        $candidate = $_
+        @($prefixes | Where-Object { $candidate.StartsWith($_, [System.StringComparison]::Ordinal) }).Count -gt 0
+    } | Sort-Object -Unique)
+}
+
+function Get-TrackedSourceDigest {
+    param(
+        [string]$Directory,
+        [string[]]$Files
+    )
+
+    $incremental = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try {
+        foreach ($relative in @($Files | Sort-Object -Unique)) {
+            $normalized = ([string]$relative).Replace("\", "/")
+            $path = [System.IO.Path]::GetFullPath((Join-Path $Directory $normalized))
+            $prefix = [System.IO.Path]::GetFullPath($Directory).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "source digest path escapes compiler root: $normalized"
+            }
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "tracked compiler source file is missing: $normalized"
+            }
+            $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+            $lengthBytes = [BitConverter]::GetBytes([uint64]$nameBytes.Length)
+            if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($lengthBytes) }
+            $incremental.AppendData($lengthBytes)
+            $incremental.AppendData($nameBytes)
+            $content = [System.IO.File]::ReadAllBytes($path)
+            $contentLengthBytes = [BitConverter]::GetBytes([uint64]$content.Length)
+            if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($contentLengthBytes) }
+            $incremental.AppendData($contentLengthBytes)
+            $incremental.AppendData($content)
+        }
+        return Convert-BytesToHex -Value $incremental.GetHashAndReset()
+    } finally {
+        $incremental.Dispose()
+    }
+}
+
 function Convert-HexToBytes {
     param([string]$Value)
 
@@ -145,9 +240,16 @@ $checks = New-Object System.Collections.ArrayList
 $failures = New-Object System.Collections.ArrayList
 $artifactPath = Resolve-UserPath -Value $Artifact
 $profilePath = Resolve-UserPath -Value $Profile
+$manifestPath = if ($Manifest) { Resolve-UserPath -Value $Manifest } else { $null }
 $profileObject = $null
 $profileFileHash = $null
+$manifestFileHash = $null
+$manifestObject = $null
 $artifactBytes = $null
+$actualCompilerHash = ""
+$actualCompilerSourceHash = ""
+$actualCompilerCommit = ""
+$actualCompilerDirty = $null
 
 if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
     Add-Check -Name "profile.exists" -Status "fail" -Expected $true -Actual $false -Detail "profile file does not exist"
@@ -163,6 +265,30 @@ if ($ExpectedProfileSha256) {
     }
 }
 
+if ($manifestPath) {
+    $manifestExists = Test-Path -LiteralPath $manifestPath -PathType Leaf
+    Add-Check -Name "manifest.exists" -Status $(if ($manifestExists) { "pass" } else { "fail" }) -Expected $true -Actual $manifestExists
+    if ($manifestExists) {
+        $manifestFileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
+        if ($ExpectedManifestSha256) {
+            $manifestHashValid = $ExpectedManifestSha256 -match '^[0-9a-fA-F]{64}$'
+            Add-Check -Name "external.manifest-sha256.format" -Status $(if ($manifestHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedManifestSha256
+            if ($manifestHashValid) {
+                Add-Check -Name "external.manifest-sha256" -Status $(if ($manifestFileHash -eq $ExpectedManifestSha256.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $ExpectedManifestSha256.ToLowerInvariant() -Actual $manifestFileHash
+            }
+        }
+        try {
+            $manifestObject = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $manifestSchemaValid = $manifestObject.schema -eq "go-obf-release-manifest/v1" -and [int]$manifestObject.version -eq 1
+            Add-Check -Name "manifest.schema" -Status $(if ($manifestSchemaValid) { "pass" } else { "fail" }) -Expected "go-obf-release-manifest/v1" -Actual $manifestObject.schema
+        } catch {
+            Add-Check -Name "manifest.json" -Status "fail" -Expected "valid JSON" -Actual "invalid" -Detail $_.Exception.Message
+        }
+    }
+} elseif ($ExpectedManifestSha256) {
+    Add-Check -Name "manifest.required" -Status "fail" -Expected "manifest path" -Actual "missing"
+}
+
 try {
     $profileObject = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
 } catch {
@@ -175,13 +301,13 @@ $profileVersionValid = $false
 try {
     if ($null -ne $profileObject.version) {
         $profileVersion = [int]$profileObject.version
-        $profileVersionValid = $profileVersion -eq 1
+        $profileVersionValid = $profileVersion -eq 1 -or $profileVersion -eq 2
     }
 } catch {
     $profileVersionValid = $false
 }
-$schemaValid = $null -ne $profileObject -and $profileObject.schema -eq "go-obf-profile/v1" -and $profileVersionValid
-Add-Check -Name "profile.schema" -Status $(if ($schemaValid) { "pass" } else { "fail" }) -Expected "go-obf-profile/v1" -Actual $(if ($null -eq $profileObject) { $null } else { $profileObject.schema })
+$schemaValid = $null -ne $profileObject -and (($profileObject.schema -eq "go-obf-profile/v1" -and $profileVersion -eq 1) -or ($profileObject.schema -eq "go-obf-profile/v2" -and $profileVersion -eq 2))
+Add-Check -Name "profile.schema" -Status $(if ($schemaValid) { "pass" } else { "fail" }) -Expected "go-obf-profile/v1 or v2" -Actual $(if ($null -eq $profileObject) { $null } else { $profileObject.schema })
 if (-not $schemaValid) {
     Emit-Result -ExitCode 2
 }
@@ -233,18 +359,25 @@ $hashMatches = $null -ne $profileArtifact -and ([string]$profileArtifact.sha256)
 Add-Check -Name "artifact.sha256" -Status $(if ($hashMatches) { "pass" } else { "fail" }) -Expected $(if ($null -eq $profileArtifact) { $null } else { $profileArtifact.sha256 }) -Actual $artifactHash
 
 $compilerProfile = $profileObject.compiler
+$compilerPathToCheck = $CompilerPath
+if (-not $compilerPathToCheck -and $compilerProfile -and $compilerProfile.path) {
+    $compilerPathToCheck = [string]$compilerProfile.path
+}
+if ($RequireCompilerBinary -and -not $compilerPathToCheck) {
+    Add-Check -Name "compiler.binary.path" -Status "fail" -Expected "compiler path" -Actual "missing"
+}
 if ($null -ne $compilerProfile -and $compilerProfile.sha256) {
     $profileCompilerHash = [string]$compilerProfile.sha256
     $profileCompilerHashValid = $profileCompilerHash -match '^[0-9a-fA-F]{64}$'
     Add-Check -Name "compiler.sha256.format" -Status $(if ($profileCompilerHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $profileCompilerHash
-    if ($profileCompilerHashValid -and $compilerProfile.path) {
+    if ($profileCompilerHashValid -and $compilerPathToCheck) {
         try {
-            $compilerPath = Resolve-UserPath -Value ([string]$compilerProfile.path)
-            if (Test-Path -LiteralPath $compilerPath -PathType Leaf) {
-                $actualCompilerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $compilerPath).Hash.ToLowerInvariant()
+            $resolvedCompilerPath = Resolve-UserPath -Value ([string]$compilerPathToCheck)
+            if (Test-Path -LiteralPath $resolvedCompilerPath -PathType Leaf) {
+                $actualCompilerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedCompilerPath).Hash.ToLowerInvariant()
                 Add-Check -Name "compiler.binary-sha256" -Status $(if ($actualCompilerHash -eq $profileCompilerHash.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $profileCompilerHash.ToLowerInvariant() -Actual $actualCompilerHash
             } else {
-                Add-Check -Name "compiler.binary-sha256" -Status "skip" -Expected $profileCompilerHash.ToLowerInvariant() -Actual "missing" -Detail "profile compiler path is not available on this machine"
+                Add-Check -Name "compiler.binary-sha256" -Status $(if ($RequireCompilerBinary) { "fail" } else { "skip" }) -Expected $profileCompilerHash.ToLowerInvariant() -Actual "missing" -Detail "compiler path is not available on this machine"
             }
         } catch {
             Add-Check -Name "compiler.binary-sha256" -Status "fail" -Expected $profileCompilerHash.ToLowerInvariant() -Actual "error" -Detail $_.Exception.Message
@@ -252,7 +385,7 @@ if ($null -ne $compilerProfile -and $compilerProfile.sha256) {
     }
 }
 if ($ExpectedCompilerSha256) {
-    $compilerHash = if ($null -eq $compilerProfile) { "" } else { [string]$compilerProfile.sha256 }
+    $compilerHash = if ($actualCompilerHash) { $actualCompilerHash } elseif ($null -eq $compilerProfile) { "" } else { [string]$compilerProfile.sha256 }
     $expectedCompilerHashValid = $ExpectedCompilerSha256 -match '^[0-9a-fA-F]{64}$'
     Add-Check -Name "external.compiler.sha256.format" -Status $(if ($expectedCompilerHashValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedCompilerSha256
     if ($expectedCompilerHashValid) {
@@ -261,11 +394,60 @@ if ($ExpectedCompilerSha256) {
 }
 if ($ExpectedCompilerCommit) {
     $compilerCommit = if ($null -eq $compilerProfile) { "" } else { [string]$compilerProfile.commit }
-    Add-Check -Name "external.compiler.commit" -Status $(if ($compilerCommit -and $compilerCommit -eq $ExpectedCompilerCommit) { "pass" } else { "fail" }) -Expected $ExpectedCompilerCommit -Actual $compilerCommit
+    $actualCommit = if ($CompilerRoot) { Get-GitRevision -Directory (Resolve-UserPath -Value $CompilerRoot) } else { $compilerCommit }
+    $actualCompilerCommit = $actualCommit
+    Add-Check -Name "external.compiler.commit" -Status $(if ($actualCommit -and $actualCommit -eq $ExpectedCompilerCommit) { "pass" } else { "fail" }) -Expected $ExpectedCompilerCommit -Actual $actualCommit
 }
 if ($RequireCleanCompiler) {
     $compilerDirty = if ($null -eq $compilerProfile) { $null } else { $compilerProfile.dirty }
-    Add-Check -Name "external.compiler.clean" -Status $(if ($compilerDirty -eq $false) { "pass" } else { "fail" }) -Expected $false -Actual $compilerDirty
+    $actualDirty = if ($CompilerRoot) { Get-GitDirty -Directory (Resolve-UserPath -Value $CompilerRoot) } else { $compilerDirty }
+    $actualCompilerDirty = $actualDirty
+    Add-Check -Name "external.compiler.clean" -Status $(if ($actualDirty -eq $false) { "pass" } else { "fail" }) -Expected $false -Actual $actualDirty
+}
+if ($CompilerRoot -or $RequireCompilerSource -or $ExpectedCompilerSourceSha256) {
+    $sourceRoot = if ($CompilerRoot) { Resolve-UserPath -Value $CompilerRoot } elseif ($compilerProfile -and $compilerProfile.sourceRoot) { Resolve-UserPath -Value ([string]$compilerProfile.sourceRoot) } else { "" }
+    if (-not $sourceRoot) {
+        Add-Check -Name "compiler.source.path" -Status "fail" -Expected "compiler source root" -Actual "missing"
+    } elseif (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+        Add-Check -Name "compiler.source.path" -Status "fail" -Expected "directory" -Actual $sourceRoot
+    } else {
+        try {
+            $sourceFiles = Get-CompilerSourceFiles -Directory $sourceRoot
+            $sourceDigest = Get-TrackedSourceDigest -Directory $sourceRoot -Files $sourceFiles
+            $actualCompilerSourceHash = $sourceDigest
+            $profileSourceDigest = if ($compilerProfile -and $compilerProfile.source) { [string]$compilerProfile.source.sha256 } else { "" }
+            Add-Check -Name "compiler.source-sha256" -Status $(if ($profileSourceDigest -and $sourceDigest -eq $profileSourceDigest.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $profileSourceDigest -Actual $sourceDigest
+            if ($ExpectedCompilerSourceSha256) {
+                $expectedSourceValid = $ExpectedCompilerSourceSha256 -match '^[0-9a-fA-F]{64}$'
+                Add-Check -Name "external.compiler.source-sha256.format" -Status $(if ($expectedSourceValid) { "pass" } else { "fail" }) -Expected "64 hex characters" -Actual $ExpectedCompilerSourceSha256
+                if ($expectedSourceValid) {
+                    Add-Check -Name "external.compiler.source-sha256" -Status $(if ($sourceDigest -eq $ExpectedCompilerSourceSha256.ToLowerInvariant()) { "pass" } else { "fail" }) -Expected $ExpectedCompilerSourceSha256.ToLowerInvariant() -Actual $sourceDigest
+                }
+            }
+        } catch {
+            Add-Check -Name "compiler.source-sha256" -Status "fail" -Expected "digest" -Actual "error" -Detail $_.Exception.Message
+        }
+    }
+}
+$toolingProfile = $profileObject.tooling
+if ($RequireTooling -or $null -ne $toolingProfile) {
+    if (-not $CompilerRoot) {
+        Add-Check -Name "tooling.root" -Status $(if ($RequireTooling) { "fail" } else { "skip" }) -Expected "CompilerRoot" -Actual "missing"
+    } else {
+        $toolRoot = Join-Path (Resolve-UserPath -Value $CompilerRoot) "misc\obf"
+        foreach ($toolName in @("build", "verify", "matrix", "integrity")) {
+            $entry = if ($null -eq $toolingProfile) { $null } else { $toolingProfile.$toolName }
+            $fileName = if ($entry -and $entry.fileName) { [string]$entry.fileName } else { "$toolName.ps1" }
+            $toolPath = Join-Path $toolRoot $fileName
+            if (Test-Path -LiteralPath $toolPath -PathType Leaf) {
+                $toolHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $toolPath).Hash.ToLowerInvariant()
+                $profileToolHash = if ($entry) { [string]$entry.sha256 } else { "" }
+                Add-Check -Name "tooling.$toolName.sha256" -Status $(if ($profileToolHash -and $profileToolHash -eq $toolHash) { "pass" } else { "fail" }) -Expected $profileToolHash -Actual $toolHash
+            } else {
+                Add-Check -Name "tooling.$toolName.sha256" -Status $(if ($RequireTooling) { "fail" } else { "skip" }) -Expected "file" -Actual "missing"
+            }
+        }
+    }
 }
 
 $buildProfile = $profileObject.build
@@ -299,6 +481,15 @@ $reportFunctionNames = @($reportFunctions | ForEach-Object { [string]$_.name })
 if ($MinReportFunctions -ge 0) {
     Add-Check -Name "coverage.minimum-functions" -Status $(if ($reportFunctions.Count -ge $MinReportFunctions) { "pass" } else { "fail" }) -Expected ">=$MinReportFunctions" -Actual $reportFunctions.Count
 }
+if ($MinV4Aliases -ge 0) {
+    $aliasReports = @($reportFunctions | Where-Object { ([string]$_.applied) -match 'aliases=([0-9]+)' })
+    $aliasValues = @($aliasReports | ForEach-Object {
+        $m = [regex]::Match([string]$_.applied, 'aliases=([0-9]+)')
+        if ($m.Success) { [int]$m.Groups[1].Value }
+    })
+    $aliasMinimum = if ($aliasValues.Count -eq 0) { 0 } else { ($aliasValues | Measure-Object -Minimum).Minimum }
+    Add-Check -Name "coverage.minimum-v4-aliases" -Status $(if ($aliasMinimum -ge $MinV4Aliases) { "pass" } else { "fail" }) -Expected ">=$MinV4Aliases" -Actual $aliasMinimum
+}
 foreach ($requiredFunction in @($RequireFunction | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })) {
     $requiredName = [string]$requiredFunction
     $requiredPresent = $reportFunctionNames -contains $requiredName
@@ -310,6 +501,16 @@ $protectedFunctions = @($reportFunctions | Where-Object {
 $hashedFunctions = @($protectedFunctions | Where-Object {
     ([string]$_.applied) -match '(^|\s)name=hash-v1(\s|$)'
 })
+
+$runtimeCheckMode = if ($null -eq $protection) { "" } else { [string]$protection.runtimeChecks }
+if ($RequireRuntimeChecks) {
+    Add-Check -Name "runtime-checks.profile" -Status $(if ($runtimeCheckMode -eq "entry-v1") { "pass" } else { "fail" }) -Expected "entry-v1" -Actual $runtimeCheckMode
+    $guardedFunctions = @($protectedFunctions | Where-Object {
+        ([string]$_.applied) -match '(^|\s)runtime=entry-v1(\s|$)'
+    })
+    $runtimeCoverageOK = $protectedFunctions.Count -gt 0 -and $guardedFunctions.Count -eq $protectedFunctions.Count
+    Add-Check -Name "runtime-checks.coverage" -Status $(if ($runtimeCoverageOK) { "pass" } else { "fail" }) -Expected "all protected functions" -Actual "$($guardedFunctions.Count)/$($protectedFunctions.Count)"
+}
 
 $nameMode = if ($null -eq $protection) { "" } else { [string]$protection.names }
 $protectedPrefix = if ($null -ne $markers -and $markers.protectedNamePrefix) { [string]$markers.protectedNamePrefix } else { "obf.fn." }
@@ -390,6 +591,7 @@ if ($null -ne $entryProfile -and [bool]$entryProfile.enabled) {
 }
 
 $scanValues = @($ForbiddenText) + @($ExpectedAbsent)
+$metadataValues = @($ForbiddenMetadata)
 $uniqueScanValues = @($scanValues | Where-Object { -not [string]::IsNullOrEmpty([string]$_) } | Select-Object -Unique)
 if ($uniqueScanValues.Count -eq 0) {
     $profileScans = @()
@@ -405,6 +607,40 @@ if ($uniqueScanValues.Count -eq 0) {
         $literalBytes = [System.Text.Encoding]::UTF8.GetBytes($literalString)
         $offset = Find-ByteSequence -Data $artifactBytes -Needle $literalBytes
         Add-Check -Name ("plaintext.absent/" + (Get-Sha256Text -Value $literalString).Substring(0, 16)) -Status $(if ($offset -lt 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $offset
+    }
+}
+foreach ($metadataLiteral in @($metadataValues | Where-Object { -not [string]::IsNullOrEmpty([string]$_) } | Select-Object -Unique)) {
+    $metadataString = [string]$metadataLiteral
+    $metadataBytes = [System.Text.Encoding]::UTF8.GetBytes($metadataString)
+    $metadataOffset = Find-ByteSequence -Data $artifactBytes -Needle $metadataBytes
+    Add-Check -Name ("metadata.absent/" + (Get-Sha256Text -Value $metadataString).Substring(0, 16)) -Status $(if ($metadataOffset -lt 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $metadataOffset
+}
+
+if ($null -ne $manifestObject) {
+    Add-Check -Name "manifest.artifact.sha256" -Status $(if ([string]$manifestObject.artifact.sha256 -eq $artifactHash) { "pass" } else { "fail" }) -Expected $artifactHash -Actual $manifestObject.artifact.sha256
+    Add-Check -Name "manifest.artifact.size" -Status $(if ([int64]$manifestObject.artifact.size -eq [int64]$artifactItem.Length) { "pass" } else { "fail" }) -Expected ([int64]$artifactItem.Length) -Actual $manifestObject.artifact.size
+    Add-Check -Name "manifest.profile.sha256" -Status $(if ([string]$manifestObject.profile.sha256 -eq $profileFileHash) { "pass" } else { "fail" }) -Expected $profileFileHash -Actual $manifestObject.profile.sha256
+    $manifestCompilerHash = [string]$manifestObject.compiler.sha256
+    $compilerHashForManifest = if ($actualCompilerHash) { $actualCompilerHash } elseif ($compilerProfile) { [string]$compilerProfile.sha256 } else { "" }
+    Add-Check -Name "manifest.compiler.sha256" -Status $(if ($manifestCompilerHash -and $manifestCompilerHash -eq $compilerHashForManifest) { "pass" } else { "fail" }) -Expected $compilerHashForManifest -Actual $manifestCompilerHash
+    $sourceHashForManifest = if ($actualCompilerSourceHash) { $actualCompilerSourceHash } elseif ($compilerProfile -and $compilerProfile.source) { [string]$compilerProfile.source.sha256 } else { "" }
+    Add-Check -Name "manifest.compiler.source-sha256" -Status $(if ([string]$manifestObject.compiler.sourceSha256 -eq $sourceHashForManifest) { "pass" } else { "fail" }) -Expected $sourceHashForManifest -Actual $manifestObject.compiler.sourceSha256
+    $commitForManifest = if ($actualCompilerCommit) { $actualCompilerCommit } elseif ($compilerProfile) { [string]$compilerProfile.commit } else { "" }
+    Add-Check -Name "manifest.compiler.commit" -Status $(if ([string]$manifestObject.compiler.commit -eq $commitForManifest) { "pass" } else { "fail" }) -Expected $commitForManifest -Actual $manifestObject.compiler.commit
+    if ($toolingProfile) {
+        Add-Check -Name "manifest.tooling.build" -Status $(if ([string]$manifestObject.tooling.buildSha256 -eq [string]$toolingProfile.build.sha256) { "pass" } else { "fail" }) -Expected $toolingProfile.build.sha256 -Actual $manifestObject.tooling.buildSha256
+        Add-Check -Name "manifest.tooling.verify" -Status $(if ([string]$manifestObject.tooling.verifySha256 -eq [string]$toolingProfile.verify.sha256) { "pass" } else { "fail" }) -Expected $toolingProfile.verify.sha256 -Actual $manifestObject.tooling.verifySha256
+        Add-Check -Name "manifest.tooling.matrix" -Status $(if ([string]$manifestObject.tooling.matrixSha256 -eq [string]$toolingProfile.matrix.sha256) { "pass" } else { "fail" }) -Expected $toolingProfile.matrix.sha256 -Actual $manifestObject.tooling.matrixSha256
+        Add-Check -Name "manifest.tooling.integrity" -Status $(if ([string]$manifestObject.tooling.integritySha256 -eq [string]$toolingProfile.integrity.sha256) { "pass" } else { "fail" }) -Expected $toolingProfile.integrity.sha256 -Actual $manifestObject.tooling.integritySha256
+    }
+    Add-Check -Name "manifest.seed-fingerprint" -Status $(if ([string]$manifestObject.build.seedFingerprint -eq $profileSeedFingerprint) { "pass" } else { "fail" }) -Expected $profileSeedFingerprint -Actual $manifestObject.build.seedFingerprint
+    if ($buildProfile -and $buildProfile.target) {
+        Add-Check -Name "manifest.target.goos" -Status $(if ([string]$manifestObject.build.GOOS -eq [string]$buildProfile.target.GOOS) { "pass" } else { "fail" }) -Expected $buildProfile.target.GOOS -Actual $manifestObject.build.GOOS
+        Add-Check -Name "manifest.target.goarch" -Status $(if ([string]$manifestObject.build.GOARCH -eq [string]$buildProfile.target.GOARCH) { "pass" } else { "fail" }) -Expected $buildProfile.target.GOARCH -Actual $manifestObject.build.GOARCH
+        Add-Check -Name "manifest.target.cgo" -Status $(if ([string]$manifestObject.build.CGO_ENABLED -eq [string]$buildProfile.target.CGO_ENABLED) { "pass" } else { "fail" }) -Expected $buildProfile.target.CGO_ENABLED -Actual $manifestObject.build.CGO_ENABLED
+    }
+    if ($manifestObject.protection) {
+        Add-Check -Name "manifest.protection.runtime-checks" -Status $(if ([string]$manifestObject.protection.runtimeChecks -eq $runtimeCheckMode) { "pass" } else { "fail" }) -Expected $runtimeCheckMode -Actual $manifestObject.protection.runtimeChecks
     }
 }
 

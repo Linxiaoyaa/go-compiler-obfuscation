@@ -11,11 +11,16 @@ param(
     [string]$SeedEnv = "GO_OBF_SEED",
     [string]$Cache = "",
     [string]$Report = "",
+    [string]$Manifest = "",
+    [int]$VMBudget = 2048,
     [string[]]$ScanPlaintext = @(),
+    [string[]]$ScanMetadata = @(),
+    [switch]$NoDefaultMetadataScan,
     [switch]$NoObfuscateNames,
     [switch]$KeepPclnNames,
     [switch]$NoObfuscateEntryOff,
     [switch]$NoObfuscateMagic,
+    [switch]$NoRuntimeChecks,
     [switch]$NoRandomizeLayout,
     [switch]$NoObfuscateFileNames,
     [switch]$KeepSymbols,
@@ -54,6 +59,67 @@ function Get-GitDirty {
         return $LASTEXITCODE -eq 0 -and $value.Count -gt 0
     } catch {
         return $null
+    }
+}
+
+function Get-CompilerSourceFiles {
+    param([string]$Directory)
+
+    $prefixes = @(
+        "src/cmd/compile/",
+        "src/cmd/internal/",
+        "src/cmd/link/",
+        "src/internal/abi/",
+        "src/internal/buildcfg/",
+        "src/internal/goarch/",
+        "src/internal/objabi/",
+        "src/internal/pkgbits/",
+        "src/internal/platform/",
+        "src/internal/runtime/",
+        "src/runtime/"
+    )
+    $files = @(& git -C $Directory ls-files --cached --others --exclude-standard -- "src" 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-files failed for compiler source root: $Directory"
+    }
+    return @($files | ForEach-Object { ([string]$_).Replace("\", "/") } | Where-Object {
+        $candidate = $_
+        @($prefixes | Where-Object { $candidate.StartsWith($_, [System.StringComparison]::Ordinal) }).Count -gt 0
+    } | Sort-Object -Unique)
+}
+
+function Get-TrackedSourceDigest {
+    param(
+        [string]$Directory,
+        [string[]]$Files
+    )
+
+    $incremental = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try {
+        foreach ($relative in @($Files | Sort-Object -Unique)) {
+            $normalized = ([string]$relative).Replace("\", "/")
+            $path = [System.IO.Path]::GetFullPath((Join-Path $Directory $normalized))
+            $prefix = [System.IO.Path]::GetFullPath($Directory).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "source digest path escapes compiler root: $normalized"
+            }
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "tracked compiler source file is missing: $normalized"
+            }
+            $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+            $lengthBytes = [BitConverter]::GetBytes([uint64]$nameBytes.Length)
+            if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($lengthBytes) }
+            $incremental.AppendData($lengthBytes)
+            $incremental.AppendData($nameBytes)
+            $content = [System.IO.File]::ReadAllBytes($path)
+            $contentLengthBytes = [BitConverter]::GetBytes([uint64]$content.Length)
+            if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($contentLengthBytes) }
+            $incremental.AppendData($contentLengthBytes)
+            $incremental.AppendData($content)
+        }
+        return Convert-BytesToHex -Value $incremental.GetHashAndReset()
+    } finally {
+        $incremental.Dispose()
     }
 }
 
@@ -352,7 +418,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 $seedFingerprint = Get-Sha256Text -Value ("go-obf-seed-v1/" + $Seed)
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v10"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v11"
 }
 $Cache = Resolve-UserPath -Value $Cache
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -363,9 +429,13 @@ $oldGOTOOLCHAIN = $env:GOTOOLCHAIN
 $oldObfSeed = $env:GO_OBF_SEED
 $temporaryOut = $null
 $temporaryReport = $null
+$temporaryManifest = $null
 $artifactBackup = $null
 $reportBackup = $null
+$manifestBackup = $null
 $publishedArtifactWasNew = $false
+$publishedReportWasNew = $false
+$publishedManifestWasNew = $false
 try {
     $env:GOROOT = $root
     $env:GOCACHE = $Cache
@@ -398,6 +468,21 @@ try {
             New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
         }
     }
+    $manifestPath = $null
+    if ($Manifest) {
+        if (-not $reportPath) {
+            throw "Manifest requires Report so the release record can bind both files"
+        }
+        $manifestPath = Resolve-UserPath -Value $Manifest
+        if ([StringComparer]::OrdinalIgnoreCase.Equals($manifestPath, $outPath) -or
+            [StringComparer]::OrdinalIgnoreCase.Equals($manifestPath, $reportPath)) {
+            throw "Manifest path must differ from artifact and report paths"
+        }
+        $manifestDir = Split-Path -Parent $manifestPath
+        if ($manifestDir) {
+            New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
+        }
+    }
 
     $temporaryOut = "$outPath.tmp.$PID"
     if (Test-Path -LiteralPath $temporaryOut) {
@@ -405,7 +490,15 @@ try {
     }
 
     $nameFlag = if ($NoObfuscateNames) { "" } else { ",obfnames=1" }
-    $gcflags = "$Pattern=-d=obfseedenv=GO_OBF_SEED,obfseedid=$seedFingerprint,obfreport=1$nameFlag"
+    # The guard binds compiler-generated seals to both linker-patched runtime
+    # fields. Diagnostic builds that retain either raw field intentionally do
+    # not receive a guard unless they restore the normal protected layout.
+    $runtimeChecksEnabled = -not $NoRuntimeChecks -and -not $NoObfuscateEntryOff -and -not $NoObfuscateMagic
+    $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=1" } else { "" }
+    if ($VMBudget -lt 256) {
+        throw "VMBudget must be at least 256"
+    }
+    $gcflags = "$Pattern=-d=obfseedenv=GO_OBF_SEED,obfseedid=$seedFingerprint,obfv4budget=$VMBudget,obfreport=1$nameFlag$runtimeCheckFlag"
     $args = @("build", "-trimpath", "-gcflags=$gcflags", "-o", $temporaryOut)
 
     $entryKey = $null
@@ -452,6 +545,7 @@ try {
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
     Write-Host "pclntab:  $(if ($NoObfuscateMagic) { 'standard-magic' } else { 'seed-magic' })"
+    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v1' } else { 'disabled' })"
     Write-Host "layout:   $(if ($NoRandomizeLayout) { 'stable' } else { 'seed-randomized' })"
     Write-Host "files:    $(if ($NoObfuscateFileNames) { 'original' } else { 'hashed-pclntab' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -480,7 +574,7 @@ try {
     }
 
     $artifactBytes = $null
-    if ($Report -or $ScanPlaintext.Count -gt 0) {
+    if ($Report -or $ScanPlaintext.Count -gt 0 -or $ScanMetadata.Count -gt 0 -or -not $NoDefaultMetadataScan) {
         $artifactBytes = [System.IO.File]::ReadAllBytes($temporaryOut)
     }
     $scanResults = @()
@@ -503,6 +597,30 @@ try {
             }
         }
         Write-Host "scan:     $($ScanPlaintext.Count) plaintext value(s) absent"
+    }
+    $defaultMetadataValues = @()
+    if (-not $NoDefaultMetadataScan) {
+        $defaultMetadataValues = @($Seed, $root, ([string](Get-Location).Path))
+    }
+    $metadataScanValues = @(@($defaultMetadataValues) + @($ScanMetadata) | Where-Object { -not [string]::IsNullOrEmpty([string]$_) } | Select-Object -Unique)
+    $metadataScanResults = @()
+    foreach ($metadataValue in $metadataScanValues) {
+        $metadataString = [string]$metadataValue
+        $needle = [System.Text.Encoding]::UTF8.GetBytes($metadataString)
+        $offset = Find-ByteSequence -Data $artifactBytes -Needle $needle
+        $metadataScanResults += [pscustomobject]@{
+            sha256 = Get-Sha256Text -Value $metadataString
+            length = $needle.Length
+            encoding = "utf-8"
+            present = ($offset -ge 0)
+            offset = $offset
+        }
+        if ($offset -ge 0) {
+            throw "Metadata scan matched at file offset $offset"
+        }
+    }
+    if ($metadataScanValues.Count -gt 0) {
+        Write-Host "metadata: $($metadataScanValues.Count) residual value(s) absent"
     }
 
     $temporaryArtifact = Get-Item -LiteralPath $temporaryOut
@@ -564,13 +682,22 @@ try {
         $driverHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $go).Hash.ToLowerInvariant()
         $compilerCommit = Get-GitRevision -Directory $root
         $compilerDirty = Get-GitDirty -Directory $root
+        $compilerSourceFiles = Get-CompilerSourceFiles -Directory $root
+        $compilerSourceDigest = Get-TrackedSourceDigest -Directory $root -Files $compilerSourceFiles
+        $buildToolHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash.ToLowerInvariant()
+        $verifyToolPath = Join-Path $PSScriptRoot "verify.ps1"
+        $matrixToolPath = Join-Path $PSScriptRoot "test-matrix.ps1"
+        $integrityToolPath = Join-Path $PSScriptRoot "test-integrity.ps1"
+        $verifyToolHash = if (Test-Path -LiteralPath $verifyToolPath -PathType Leaf) { (Get-FileHash -Algorithm SHA256 -LiteralPath $verifyToolPath).Hash.ToLowerInvariant() } else { "" }
+        $matrixToolHash = if (Test-Path -LiteralPath $matrixToolPath -PathType Leaf) { (Get-FileHash -Algorithm SHA256 -LiteralPath $matrixToolPath).Hash.ToLowerInvariant() } else { "" }
+        $integrityToolHash = if (Test-Path -LiteralPath $integrityToolPath -PathType Leaf) { (Get-FileHash -Algorithm SHA256 -LiteralPath $integrityToolPath).Hash.ToLowerInvariant() } else { "" }
         $targetValues = @(& $go env GOOS GOARCH CGO_ENABLED 2>$null)
         $targetGoos = if ($targetValues.Count -gt 0) { ([string]$targetValues[0]).Trim() } else { "" }
         $targetGoarch = if ($targetValues.Count -gt 1) { ([string]$targetValues[1]).Trim() } else { "" }
         $targetCgo = if ($targetValues.Count -gt 2) { ([string]$targetValues[2]).Trim() } else { "" }
         $profile = [ordered]@{
-            schema = "go-obf-profile/v1"
-            version = 1
+            schema = "go-obf-profile/v2"
+            version = 2
             generatedAtUtc = [DateTime]::UtcNow.ToString("o")
             compiler = [ordered]@{
                 path = [System.IO.Path]::GetFullPath($compilerPath)
@@ -578,11 +705,23 @@ try {
                 sha256 = $compilerHash
                 commit = $compilerCommit
                 dirty = $compilerDirty
+                sourceRoot = $root
+                source = [ordered]@{
+                    algorithm = "sha256-length-prefixed-v1"
+                    sha256 = $compilerSourceDigest
+                    trackedFiles = $compilerSourceFiles.Count
+                }
                 driver = [ordered]@{
                     path = [System.IO.Path]::GetFullPath($go)
                     version = $driverVersion
                     sha256 = $driverHash
                 }
+            }
+            tooling = [ordered]@{
+                build = [ordered]@{ fileName = "build.ps1"; sha256 = $buildToolHash }
+                verify = [ordered]@{ fileName = "verify.ps1"; sha256 = $verifyToolHash }
+                matrix = [ordered]@{ fileName = "test-matrix.ps1"; sha256 = $matrixToolHash }
+                integrity = [ordered]@{ fileName = "test-integrity.ps1"; sha256 = $integrityToolHash }
             }
             build = [ordered]@{
                 package = $Package
@@ -611,8 +750,9 @@ try {
                 pclntabMagic = $magicKind
                 functionLayout = if ($NoRandomizeLayout) { "stable" } else { "seed-randomized" }
                 fileNames = if ($NoObfuscateFileNames) { "original" } else { "hashed-pclntab" }
-                stringRuntime = "v2"
-                vm = "v3"
+                stringRuntime = "v2+v3-ephemeral"
+                vm = "v4-budgeted"
+                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v1" } else { "disabled" }
             }
             artifact = [ordered]@{
                 path = $outPath
@@ -621,6 +761,7 @@ try {
                 elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
             }
             plaintextScans = @($scanResults)
+            metadataScans = @($metadataScanResults)
             obfReport = [ordered]@{
                 count = @($obfReports).Count
                 functions = @($obfReports | ForEach-Object {
@@ -652,6 +793,46 @@ try {
         $json = $profile | ConvertTo-Json -Depth 12
         $temporaryReport = "$reportPath.tmp.$PID"
         Set-Content -LiteralPath $temporaryReport -Value $json -Encoding UTF8
+        if ($manifestPath) {
+            $profileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $temporaryReport).Hash.ToLowerInvariant()
+            $manifestObject = [ordered]@{
+                schema = "go-obf-release-manifest/v1"
+                version = 1
+                artifact = [ordered]@{
+                    fileName = [System.IO.Path]::GetFileName($outPath)
+                    size = $artifactLength
+                    sha256 = $hash.Hash.ToLowerInvariant()
+                }
+                profile = [ordered]@{
+                    fileName = [System.IO.Path]::GetFileName($reportPath)
+                    sha256 = $profileHash
+                }
+                compiler = [ordered]@{
+                    sha256 = $compilerHash
+                    commit = $compilerCommit
+                    sourceSha256 = $compilerSourceDigest
+                    sourceFiles = $compilerSourceFiles.Count
+                    dirty = $compilerDirty
+                }
+                tooling = [ordered]@{
+                    buildSha256 = $buildToolHash
+                    verifySha256 = $verifyToolHash
+                    matrixSha256 = $matrixToolHash
+                    integritySha256 = $integrityToolHash
+                }
+                build = [ordered]@{
+                    seedFingerprint = $seedFingerprint
+                    GOOS = $targetGoos
+                    GOARCH = $targetGoarch
+                    CGO_ENABLED = $targetCgo
+                }
+                protection = [ordered]@{
+                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v1" } else { "disabled" }
+                }
+            }
+            $temporaryManifest = "$manifestPath.tmp.$PID"
+            Set-Content -LiteralPath $temporaryManifest -Value ($manifestObject | ConvertTo-Json -Depth 8) -Encoding UTF8
+        }
     }
 
     if (Test-Path -LiteralPath $outPath -PathType Leaf) {
@@ -669,10 +850,37 @@ try {
                 [System.IO.File]::Replace($temporaryReport, $reportPath, $reportBackup, $true)
             } else {
                 [System.IO.File]::Move($temporaryReport, $reportPath)
+                $publishedReportWasNew = $true
             }
             $temporaryReport = $null
         }
+        if ($manifestPath) {
+            if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+                $manifestBackup = "$manifestPath.rollback.$PID"
+                [System.IO.File]::Replace($temporaryManifest, $manifestPath, $manifestBackup, $true)
+            } else {
+                [System.IO.File]::Move($temporaryManifest, $manifestPath)
+                $publishedManifestWasNew = $true
+            }
+            $temporaryManifest = $null
+        }
     } catch {
+        if ($manifestBackup -and (Test-Path -LiteralPath $manifestBackup -PathType Leaf)) {
+            $failedManifest = "$manifestPath.failed.$PID"
+            [System.IO.File]::Replace($manifestBackup, $manifestPath, $failedManifest, $true)
+            $manifestBackup = $null
+            Remove-Item -LiteralPath $failedManifest -Force -ErrorAction SilentlyContinue
+        } elseif ($publishedManifestWasNew -and $manifestPath -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $manifestPath -Force
+        }
+        if ($reportBackup -and (Test-Path -LiteralPath $reportBackup -PathType Leaf)) {
+            $failedReport = "$reportPath.failed.$PID"
+            [System.IO.File]::Replace($reportBackup, $reportPath, $failedReport, $true)
+            $reportBackup = $null
+            Remove-Item -LiteralPath $failedReport -Force -ErrorAction SilentlyContinue
+        } elseif ($publishedReportWasNew -and $reportPath -and (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $reportPath -Force
+        }
         if ($artifactBackup -and (Test-Path -LiteralPath $artifactBackup -PathType Leaf)) {
             $failedArtifact = "$outPath.failed.$PID"
             [System.IO.File]::Replace($artifactBackup, $outPath, $failedArtifact, $true)
@@ -692,6 +900,10 @@ try {
         Remove-Item -LiteralPath $reportBackup -Force -ErrorAction SilentlyContinue
         $reportBackup = $null
     }
+    if ($manifestBackup -and (Test-Path -LiteralPath $manifestBackup)) {
+        Remove-Item -LiteralPath $manifestBackup -Force -ErrorAction SilentlyContinue
+        $manifestBackup = $null
+    }
 
     Write-Host "output:   $outPath"
     Write-Host "size:     $artifactLength"
@@ -700,12 +912,18 @@ try {
     if ($reportPath) {
         Write-Host "report:   $reportPath"
     }
+    if ($manifestPath) {
+        Write-Host "manifest: $manifestPath"
+    }
 } finally {
     if ($temporaryOut -and (Test-Path -LiteralPath $temporaryOut)) {
         Remove-Item -LiteralPath $temporaryOut -Force -ErrorAction SilentlyContinue
     }
     if ($temporaryReport -and (Test-Path -LiteralPath $temporaryReport)) {
         Remove-Item -LiteralPath $temporaryReport -Force -ErrorAction SilentlyContinue
+    }
+    if ($temporaryManifest -and (Test-Path -LiteralPath $temporaryManifest)) {
+        Remove-Item -LiteralPath $temporaryManifest -Force -ErrorAction SilentlyContinue
     }
     $env:GOROOT = $oldGOROOT
     $env:GOCACHE = $oldGOCACHE

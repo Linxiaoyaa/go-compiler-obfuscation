@@ -22,6 +22,7 @@ func TestProtectionPragmaFlags(t *testing.T) {
 		{"go:encrypt", ir.ProtectEncrypt},
 		{"go:vm", ir.ProtectVirtualize},
 		{"go:noprotect", ir.ProtectExclude},
+		{"go:ephemeral", ir.ProtectEphemeral},
 	}
 	for _, test := range tests {
 		if got := protectionFlag(test.verb); got != test.want {
