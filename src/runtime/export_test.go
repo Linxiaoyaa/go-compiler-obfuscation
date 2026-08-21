@@ -61,6 +61,28 @@ func ObfStringDataV3ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64) (
 	return before, after
 }
 
+// ObfStringDataV4ForTest returns individual String v4 byte decodes. The
+// production path never joins these bytes into a plaintext string.
+func ObfStringDataV4ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64) []byte {
+	if len(ciphertext) == 0 {
+		return nil
+	}
+	result := make([]byte, len(ciphertext))
+	for i := range result {
+		switch decoder & 3 {
+		case 0:
+			result[i] = obfStringByteV4A(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3])
+		case 1:
+			result[i] = obfStringByteV4B(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3])
+		case 2:
+			result[i] = obfStringByteV4C(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3])
+		default:
+			result[i] = obfStringByteV4D(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3])
+		}
+	}
+	return result
+}
+
 // ObfRuntimeGuardSealForTest exposes the deterministic guard seal calculation.
 func ObfRuntimeGuardSealForTest(tag uint64, entryKey, magic uint32) uint64 {
 	return obfRuntimeGuardSealV1(tag, entryKey, magic)
@@ -70,6 +92,17 @@ func ObfRuntimeGuardSealForTest(tag uint64, entryKey, magic uint32) uint64 {
 // the production fatal path.
 func ObfRuntimeGuardValidForTest(tag, seal uint64, entryKey, magic, headerMagic uint32) bool {
 	return obfRuntimeGuardValidV1(tag, seal, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic))
+}
+
+// ObfRuntimeGuardV2SealForTest exposes the v2 function seal calculation.
+func ObfRuntimeGuardV2SealForTest(tag uint64, entryKey, magic uint32, bootstrap uint64) uint64 {
+	return obfRuntimeGuardSealV2(tag, entryKey, magic, bootstrap)
+}
+
+// ObfRuntimeGuardV2ValidForTest checks v2 guard inputs without entering the
+// production fatal path or changing the package-global bootstrap cache.
+func ObfRuntimeGuardV2ValidForTest(tag, seal, expectedBootstrap uint64, entryKey, magic, headerMagic uint32, bootstrap uint64) bool {
+	return obfRuntimeGuardValidV2(tag, seal, expectedBootstrap, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic), bootstrap)
 }
 
 var Fadd64 = fadd64

@@ -3760,15 +3760,19 @@ func (s *state) exprCheckPtr(n ir.Node, checkPtrOK bool) *ssa.Value {
 	}
 }
 
-// obfuscatedStringLiteral lowers a protected literal to a String v2 runtime
-// decode call. The call returns the final byte pointer and length, so the
-// caller constructs the string header without creating a second plaintext
-// buffer.
+// obfuscatedStringLiteral lowers a protected literal to its selected runtime
+// representation. String v2/v3 decoders return plaintext backing storage.
+// String v4 returns an opaque ciphertext token; the SSA stream pass replaces
+// approved byte loads with one-byte decoder calls before code generation.
 func (s *state) obfuscatedStringLiteral(t *types.Type, text string) *ssa.Value {
 	var sym *obj.LSym
 	var key staticdata.ObfuscatedStringKey
 	version := 2
-	if s.curfn.Protection&ir.ProtectEphemeral != 0 {
+	if s.curfn.Protection&ir.ProtectStream != 0 {
+		sym, key = staticdata.ObfuscatedStringSymV4(
+			s.curfn.Pos(), ir.FuncName(s.curfn), base.Debug.ObfSeed, text)
+		version = 4
+	} else if s.curfn.Protection&ir.ProtectEphemeral != 0 {
 		sym, key = staticdata.ObfuscatedStringSymV3(
 			s.curfn.Pos(), ir.FuncName(s.curfn), base.Debug.ObfSeed, text)
 		version = 3
@@ -3795,6 +3799,8 @@ func obfuscatedStringRuntimeName(version int, decoder uint8) string {
 	prefix := "obfStringDataV2"
 	if version == 3 {
 		prefix = "obfStringDataV3"
+	} else if version == 4 {
+		prefix = "obfStringTokenV4"
 	}
 	switch decoder & 3 {
 	case 0:
@@ -8065,7 +8071,9 @@ func (e *ssafn) Syslook(name string) *obj.LSym {
 		return ir.Syms.CgoCheckPtrWrite
 	case "obfStringDataV2A", "obfStringDataV2B", "obfStringDataV2C", "obfStringDataV2D",
 		"obfStringDataV3A", "obfStringDataV3B", "obfStringDataV3C", "obfStringDataV3D", "obfStringWipeV3",
-		"obfRuntimeGuardV1":
+		"obfStringTokenV4A", "obfStringTokenV4B", "obfStringTokenV4C", "obfStringTokenV4D",
+		"obfStringByteV4A", "obfStringByteV4B", "obfStringByteV4C", "obfStringByteV4D",
+		"obfRuntimeGuardV1", "obfRuntimeGuardV2":
 		return typecheck.LookupRuntimeFunc(name)
 	}
 	e.Fatalf(src.NoXPos, "unknown Syslook func %v", name)

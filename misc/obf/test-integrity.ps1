@@ -265,4 +265,20 @@ Assert-ExpectedFailure -Name "runtime-check-mode-tamper" -Fixture $runtimeCase -
     -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
     -ExpectedCheck "runtime-checks.profile"
 
+# Keep the declared v2 mode but remove the patched bootstrap marker. This
+# verifies that a self-consistent release record cannot omit the independent
+# Guard v2 image binding.
+$guardV2Case = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v2-marker-tamper") `
+    -SourceArtifact $sourceArtifact -SourceProfile $sourceProfile -SourceManifest $sourceManifest
+$guardV2Profile = Get-Content -LiteralPath $guardV2Case.profile -Raw | ConvertFrom-Json
+$guardV2Profile.markers.runtimeGuardV2.enabled = $false
+Save-Json -Path $guardV2Case.profile -Object $guardV2Profile
+$guardV2Manifest = Get-Content -LiteralPath $guardV2Case.manifest -Raw | ConvertFrom-Json
+$guardV2Manifest.profile.sha256 = Get-FileSha256 -Path $guardV2Case.profile
+Save-Json -Path $guardV2Case.manifest -Object $guardV2Manifest
+Assert-ExpectedFailure -Name "runtime-guard-v2-marker-tamper" -Fixture $guardV2Case -VerifierPath $verifierPath `
+    -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
+    -ExpectedCheck "runtime-checks.bootstrap-profile"
+
 Write-Output "integrity negative suite passed"
+exit 0

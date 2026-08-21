@@ -72,7 +72,9 @@ func walkExpr(n ir.Node, init *ir.Nodes) ir.Node {
 		// symbol and never creates plaintext rodata for the marked function.
 		text := constant.StringVal(n.Val())
 		if text != "" && ir.CurFunc != nil && ir.CurFunc.Protection&ir.ProtectEncrypt != 0 {
-			if ir.CurFunc.Protection&ir.ProtectEphemeral != 0 {
+			if ir.CurFunc.Protection&ir.ProtectStream != 0 {
+				_, _ = staticdata.ObfuscatedStringSymV4(n.Pos(), ir.FuncName(ir.CurFunc), base.Debug.ObfSeed, text)
+			} else if ir.CurFunc.Protection&ir.ProtectEphemeral != 0 {
 				_, _ = staticdata.ObfuscatedStringSymV3(n.Pos(), ir.FuncName(ir.CurFunc), base.Debug.ObfSeed, text)
 			} else {
 				_, _ = staticdata.ObfuscatedStringSym(n.Pos(), ir.FuncName(ir.CurFunc), base.Debug.ObfSeed, text)

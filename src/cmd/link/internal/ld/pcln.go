@@ -35,6 +35,10 @@ const obfEntryOffKeySym = "runtime.obfEntryOffKey"
 
 const obfPclnMagicSym = "runtime.obfPclnMagic"
 
+const obfRuntimeGuardV2SealSym = "runtime.obfRuntimeGuardV2Seal"
+
+const obfRuntimeGuardV2Unpatched uint64 = 0xa5a5a5a5a5a5a5a5
+
 // pclntab holds the state needed for pclntab generation.
 type pclntab struct {
 	// The first and last functions found.
@@ -423,6 +427,39 @@ func (ctxt *Link) configureObfPclnMagic() {
 		Exitf("%s is too small for -obfmagic", obfPclnMagicSym)
 	}
 	updater.SetUint32(ctxt.Arch, 0, magic)
+}
+
+func (ctxt *Link) configureObfRuntimeGuardV2() {
+	if !*flagObfGuardV2 {
+		return
+	}
+	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
+		Exitf("-obfguardv2 is supported only for executable and PIE builds")
+	}
+	if !*flagObfEntryOff || !*flagObfPclnMagic {
+		Exitf("-obfguardv2 requires -obfentryoff and -obfmagic")
+	}
+	seal := *flagObfGuardV2Seal
+	if seal == 0 || seal == obfRuntimeGuardV2Unpatched {
+		Exitf("-obfguardv2seal must be a non-zero non-sentinel 64-bit value")
+	}
+	sym := ctxt.loader.Lookup(obfRuntimeGuardV2SealSym, 0)
+	if sym == 0 {
+		Exitf("-obfguardv2 requires %s", obfRuntimeGuardV2SealSym)
+	}
+	updater := ctxt.loader.MakeSymbolUpdater(sym)
+	if updater.Size() < 8 {
+		Exitf("%s is too small for -obfguardv2", obfRuntimeGuardV2SealSym)
+	}
+	first, second := obfRuntimeGuardV2SealWords(ctxt.Arch.ByteOrder, seal)
+	updater.SetUint32(ctxt.Arch, 0, first)
+	updater.SetUint32(ctxt.Arch, 4, second)
+}
+
+func obfRuntimeGuardV2SealWords(order binary.ByteOrder, seal uint64) (uint32, uint32) {
+	var encoded [8]byte
+	order.PutUint64(encoded[:], seal)
+	return order.Uint32(encoded[:4]), order.Uint32(encoded[4:])
 }
 
 func isObfuscatedPclnMagic(magic uint32) bool {
@@ -1139,6 +1176,7 @@ func (ctxt *Link) pclntab(container loader.Bitmap) *pclntab {
 	state.generatePctab(ctxt, funcs)
 	inlSyms := makeInlSyms(ctxt, funcs, nameOffsets)
 	ctxt.configureObfEntryOff()
+	ctxt.configureObfRuntimeGuardV2()
 	state.generateFunctab(ctxt, funcs, inlSyms, cuOffsets, nameOffsets)
 	state.generateFuncdata(ctxt, funcs, inlSyms)
 

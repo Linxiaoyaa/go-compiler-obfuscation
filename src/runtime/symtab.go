@@ -627,6 +627,14 @@ var obfPclnMagic = obfPclnMagicUnpatched
 var obfPclnMagicDefaultHi uint32 = 0xffff
 var obfPclnMagicDefaultLo uint32 = 0xfff1
 
+// obfRuntimeGuardV2Seal is a separate linker-patched bootstrap value for
+// protected release binaries. It remains distinct from pclntab metadata so a
+// locally self-consistent metadata edit still has to satisfy an independent
+// process-wide binding.
+const obfRuntimeGuardV2Unpatched uint64 = 0xa5a5a5a5a5a5a5a5
+
+var obfRuntimeGuardV2Seal uint64 = obfRuntimeGuardV2Unpatched
+
 func expectedPclnMagic() abi.PCLnTabMagic {
 	if obfPclnMagic != obfPclnMagicUnpatched {
 		return obfPclnMagic

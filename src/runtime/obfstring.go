@@ -126,6 +126,79 @@ func obfStringFinalizeV3(header *obfStringHeaderV3) {
 	header.cookie = 0
 }
 
+// String v4 keeps only ciphertext in the string header emitted by the
+// compiler. The token calls preserve the existing string ABI while carrying
+// the ciphertext pointer, length, key lanes, and decoder choice into the SSA
+// stream rewrite. No token call decodes or allocates a complete plaintext.
+
+//go:noinline
+func obfStringTokenV4A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	return obfStringTokenV4(src, n, k0, k1, k2, k3, 0)
+}
+
+//go:noinline
+func obfStringTokenV4B(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	return obfStringTokenV4(src, n, k0, k1, k2, k3, 1)
+}
+
+//go:noinline
+func obfStringTokenV4C(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	return obfStringTokenV4(src, n, k0, k1, k2, k3, 2)
+}
+
+//go:noinline
+func obfStringTokenV4D(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
+	return obfStringTokenV4(src, n, k0, k1, k2, k3, 3)
+}
+
+func obfStringTokenV4(src *byte, n int, k0, k1, k2, k3 uint64, decoder uint8) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	if src == nil {
+		throw("invalid protected string token")
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	// Keep every lane live through this boundary without creating a
+	// plaintext-derived value. The unlikely sentinel also catches malformed
+	// hand-crafted token invocations before a byte decoder reaches memory.
+	if key[0]^key[1]^key[2]^key[3]^uint64(n)^uint64(decoder) == 0x7ac4b5d93e102f61 {
+		throw("invalid protected string token")
+	}
+	obfStringWipeV2(&key)
+	return src, n
+}
+
+//go:noinline
+func obfStringByteV4A(src *byte, n, index int, k0, k1, k2, k3 uint64) byte {
+	return obfStringByteV4(src, n, index, k0, k1, k2, k3, 0)
+}
+
+//go:noinline
+func obfStringByteV4B(src *byte, n, index int, k0, k1, k2, k3 uint64) byte {
+	return obfStringByteV4(src, n, index, k0, k1, k2, k3, 1)
+}
+
+//go:noinline
+func obfStringByteV4C(src *byte, n, index int, k0, k1, k2, k3 uint64) byte {
+	return obfStringByteV4(src, n, index, k0, k1, k2, k3, 2)
+}
+
+//go:noinline
+func obfStringByteV4D(src *byte, n, index int, k0, k1, k2, k3 uint64) byte {
+	return obfStringByteV4(src, n, index, k0, k1, k2, k3, 3)
+}
+
+func obfStringByteV4(src *byte, n, index int, k0, k1, k2, k3 uint64, decoder uint8) byte {
+	if src == nil || n <= 0 || index < 0 || index >= n {
+		throw("protected string byte index out of range")
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	value := *(*byte)(add(unsafe.Pointer(src), uintptr(index))) ^ obfStringMaskV3(key, decoder, index)
+	obfStringWipeV2(&key)
+	return value
+}
+
 //go:noinline
 func obfStringDataV2A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
 	if n <= 0 {

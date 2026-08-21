@@ -43,7 +43,7 @@ try {
                 -Report $profile `
                 -Manifest $manifest `
                 -VMBudget 2048 `
-                -ScanPlaintext @("v38-cross-platform-ephemeral")
+                -ScanPlaintext @("v38-cross-platform-ephemeral", "v4-stream-byte-check")
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         } finally {
             Pop-Location
@@ -60,10 +60,10 @@ try {
             RequireCompilerSource = $true
             RequireTooling = $true
             RequireRuntimeChecks = $true
-            RequireFunction = @("main.vmCalc", "main.secretCheck")
-            MinReportFunctions = 2
+            RequireFunction = @("main.vmCalc", "main.secretCheck", "main.streamCheck")
+            MinReportFunctions = 3
             MinV4Aliases = 1
-            ExpectedAbsent = @("v38-cross-platform-ephemeral")
+            ExpectedAbsent = @("v38-cross-platform-ephemeral", "v4-stream-byte-check")
             ForbiddenMetadata = @($env:GO_OBF_SEED, $root, $fixture)
         }
         if ($RequireCleanCompiler) {

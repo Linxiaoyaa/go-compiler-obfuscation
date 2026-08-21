@@ -4,7 +4,10 @@
 
 package ld
 
-import "testing"
+import (
+	"encoding/binary"
+	"testing"
+)
 
 func TestIsObfuscatedProtectedFuncName(t *testing.T) {
 	tests := []struct {
@@ -55,6 +58,19 @@ func TestObfPclnMagicValue(t *testing.T) {
 	}
 	if !isObfuscatedPclnMagic(0x1234567d) {
 		t.Fatal("custom magic rejected")
+	}
+}
+
+func TestObfRuntimeGuardV2SealWords(t *testing.T) {
+	const seal = uint64(0x0123456789abcdef)
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		first, second := obfRuntimeGuardV2SealWords(order, seal)
+		var encoded [8]byte
+		order.PutUint32(encoded[:4], first)
+		order.PutUint32(encoded[4:], second)
+		if got := order.Uint64(encoded[:]); got != seal {
+			t.Fatalf("%T seal serialization = %#x; want %#x", order, got, seal)
+		}
 	}
 }
 

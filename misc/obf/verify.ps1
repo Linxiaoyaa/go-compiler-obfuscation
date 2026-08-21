@@ -504,12 +504,30 @@ $hashedFunctions = @($protectedFunctions | Where-Object {
 
 $runtimeCheckMode = if ($null -eq $protection) { "" } else { [string]$protection.runtimeChecks }
 if ($RequireRuntimeChecks) {
-    Add-Check -Name "runtime-checks.profile" -Status $(if ($runtimeCheckMode -eq "entry-v1") { "pass" } else { "fail" }) -Expected "entry-v1" -Actual $runtimeCheckMode
+    Add-Check -Name "runtime-checks.profile" -Status $(if ($runtimeCheckMode -eq "entry-v2") { "pass" } else { "fail" }) -Expected "entry-v2" -Actual $runtimeCheckMode
     $guardedFunctions = @($protectedFunctions | Where-Object {
-        ([string]$_.applied) -match '(^|\s)runtime=entry-v1(\s|$)'
+        ([string]$_.applied) -match '(^|\s)runtime=entry-v2(\s|$)'
     })
     $runtimeCoverageOK = $protectedFunctions.Count -gt 0 -and $guardedFunctions.Count -eq $protectedFunctions.Count
     Add-Check -Name "runtime-checks.coverage" -Status $(if ($runtimeCoverageOK) { "pass" } else { "fail" }) -Expected "all protected functions" -Actual "$($guardedFunctions.Count)/$($protectedFunctions.Count)"
+
+    $guardV2Marker = if ($null -eq $markers) { $null } else { $markers.runtimeGuardV2 }
+    $guardV2Enabled = $null -ne $guardV2Marker -and [bool]$guardV2Marker.enabled
+    $guardV2Hex = if ($guardV2Enabled) { [string]$guardV2Marker.littleEndian } else { "" }
+    $guardV2Bytes = Convert-HexToBytes -Value $guardV2Hex
+    $guardV2FormatOK = $guardV2Enabled -and $null -ne $guardV2Bytes -and $guardV2Bytes.Length -eq 8
+    Add-Check -Name "runtime-checks.bootstrap-profile" -Status $(if ($guardV2FormatOK) { "pass" } else { "fail" }) -Expected "enabled 64-bit bootstrap seal" -Actual $(if ($guardV2Enabled) { $guardV2Hex } else { "missing" })
+    if ($guardV2FormatOK) {
+        $guardV2Count = Find-ByteSequenceCount -Data $artifactBytes -Needle $guardV2Bytes
+        $recordedGuardV2Count = -1
+        try {
+            $recordedGuardV2Count = [int]$guardV2Marker.count
+        } catch {
+            $recordedGuardV2Count = -1
+        }
+        $guardV2MarkerOK = $guardV2Count -gt 0 -and $recordedGuardV2Count -eq $guardV2Count
+        Add-Check -Name "runtime-checks.bootstrap-marker" -Status $(if ($guardV2MarkerOK) { "pass" } else { "fail" }) -Expected "recorded non-zero count" -Actual "$guardV2Count/$recordedGuardV2Count"
+    }
 }
 
 $nameMode = if ($null -eq $protection) { "" } else { [string]$protection.names }

@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral
+const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral | ir.ProtectStream
 
 type vmOpcode uint8
 
@@ -132,6 +132,9 @@ func protectionFlagsString(flags ir.ProtectionFlag) string {
 	if flags&ir.ProtectEphemeral != 0 {
 		names = append(names, "ephemeral")
 	}
+	if flags&ir.ProtectStream != 0 {
+		names = append(names, "stream")
+	}
 	if flags&ir.ProtectExclude != 0 {
 		names = append(names, "noprotect")
 	}
@@ -210,7 +213,7 @@ func obfVirtualize(f *Func) {
 		applied += " obf=vm-dispatch-v3"
 	}
 	if runtimeCheck {
-		applied += " runtime=entry-v1"
+		applied += " runtime=entry-v2"
 	}
 	reportProtection(f, flags, applied)
 }
@@ -256,7 +259,9 @@ func obfHarden(f *Func) {
 			}
 		}
 		if stringProtected {
-			if flags&ir.ProtectEphemeral != 0 {
+			if flags&ir.ProtectStream != 0 {
+				applied = append(applied, "encrypt=str-runtime-v4-stream")
+			} else if flags&ir.ProtectEphemeral != 0 {
 				applied = append(applied, "encrypt=str-runtime-v3-ephemeral")
 			} else {
 				applied = append(applied, "encrypt=str-runtime-v2")
@@ -274,15 +279,15 @@ func obfHarden(f *Func) {
 		protectionError(f, "runtimecheck", "%v", err)
 		return
 	} else if runtimeCheck {
-		applied = append(applied, "runtime=entry-v1")
+		applied = append(applied, "runtime=entry-v2")
 	}
 	reportProtection(f, flags, strings.Join(applied, " "))
 }
 
-// installRuntimeGuard emits a memory-ordered entry call after the protection
-// transforms have settled. It deliberately uses the linker metadata already
-// required by a protected executable, rather than introducing a process-wide
-// plaintext key or mutable runtime cache.
+// installRuntimeGuard emits a memory-ordered v2 entry call after the protection
+// transforms have settled. It binds function-local data to the linker-patched
+// bootstrap seal, entry key, and pclntab magic without embedding the build seed
+// in the executable.
 func installRuntimeGuard(f *Func) (bool, error) {
 	if base.Debug.ObfRuntimeCheck == 0 {
 		return false, nil
@@ -296,7 +301,7 @@ func installRuntimeGuard(f *Func) (bool, error) {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV2")) {
 				return false, nil
 			}
 		}
@@ -314,17 +319,18 @@ func installRuntimeGuard(f *Func) (bool, error) {
 		return false, fmt.Errorf("could not find entry memory")
 	}
 
-	tag, seal := base.ObfRuntimeGuardV1Values(base.Debug.ObfSeed, protectionFunctionName(f))
+	tag, seal, bootstrap := base.ObfRuntimeGuardV2Values(base.Debug.ObfSeed, protectionFunctionName(f))
 	rng := newProtectionRNGDomain(f, "runtime-guard")
 	sp := entry.NewValue0(entry.Pos, OpSP, f.Config.Types.Uintptr)
 	source := entry.NewValue2(entry.Pos, OpConvert, f.Config.Types.UInt64, sp, initMem)
 	zero := opaqueZero64(entry, source)
 	tagValue := runtimeGuardConstant(entry, entry.Pos, tag, rng, zero)
 	sealValue := runtimeGuardConstant(entry, entry.Pos, seal, rng, zero)
-	argTypes := []*types.Type{f.Config.Types.UInt64, f.Config.Types.UInt64}
-	aux := StaticAuxCall(f.fe.Syslook("obfRuntimeGuardV1"), f.ABIDefault.ABIAnalyzeTypes(argTypes, nil))
+	bootstrapValue := runtimeGuardConstant(entry, entry.Pos, bootstrap, rng, zero)
+	argTypes := []*types.Type{f.Config.Types.UInt64, f.Config.Types.UInt64, f.Config.Types.UInt64}
+	aux := StaticAuxCall(f.fe.Syslook("obfRuntimeGuardV2"), f.ABIDefault.ABIAnalyzeTypes(argTypes, nil))
 	call := entry.NewValue0A(entry.Pos, OpStaticCall, types.TypeResultMem, aux)
-	call.AddArgs(tagValue, sealValue, initMem)
+	call.AddArgs(tagValue, sealValue, bootstrapValue, initMem)
 	call.AuxInt = aux.ArgWidth()
 	guardMem := entry.NewValue1I(entry.Pos, OpSelectN, types.TypeMem, 0, call)
 
@@ -368,7 +374,7 @@ func hasObfuscatedStringCall(f *Func) bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3")) {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4")) {
 				return true
 			}
 		}
@@ -387,7 +393,7 @@ func obfuscatedStringKeyConstants(f *Func) map[*Value]bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3")) {
+			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4")) {
 				continue
 			}
 			for _, arg := range v.Args {

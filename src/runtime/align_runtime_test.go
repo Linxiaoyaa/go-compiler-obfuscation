@@ -46,4 +46,5 @@ var AtomicVariables = []unsafe.Pointer{
 	unsafe.Pointer(&sched),
 	unsafe.Pointer(&ticks),
 	unsafe.Pointer(&work),
+	unsafe.Pointer(&obfRuntimeGuardV2Cache),
 }

@@ -54,6 +54,30 @@ func TestObfStringDataV3ExplicitWipe(t *testing.T) {
 	}
 }
 
+func TestObfStringDataV4ByteStream(t *testing.T) {
+	plain := []byte("string-v4-single-byte-decode")
+	lanes := [4]uint64{0x13579bdf2468ace0, 0x1020304050607080, 0xfedcba9876543210, 0x0f1e2d3c4b5a6978}
+	for decoder := 0; decoder < 4; decoder++ {
+		ciphertext := make([]byte, len(plain))
+		for i := range ciphertext {
+			ciphertext[i] = plain[i] ^ obfStringMaskForTest(lanes, uint8(decoder), i)
+		}
+		got := runtime.ObfStringDataV4ForTest(uint8(decoder), ciphertext, lanes)
+		if !bytes.Equal(got, plain) {
+			t.Fatalf("decoder %d byte stream = %q; want %q", decoder, got, plain)
+		}
+		if !bytes.Equal(ciphertext, func() []byte {
+			copy := make([]byte, len(plain))
+			for i := range copy {
+				copy[i] = plain[i] ^ obfStringMaskForTest(lanes, uint8(decoder), i)
+			}
+			return copy
+		}()) {
+			t.Fatalf("decoder %d modified ciphertext", decoder)
+		}
+	}
+}
+
 func obfStringMaskForTest(lanes [4]uint64, decoder uint8, index int) byte {
 	i := uint64(index)
 	a, b, c, d := lanes[0], lanes[1], lanes[2], lanes[3]

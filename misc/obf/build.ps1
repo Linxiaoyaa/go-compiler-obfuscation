@@ -342,6 +342,24 @@ function Get-ObfPclnMagic {
     return $magic
 }
 
+function Get-ObfRuntimeGuardV2Seal {
+    param([string]$Value)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $input = "go-obf-runtime-guard-v2/bootstrap" + [char]0 + $Value
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($input))
+    } finally {
+        $sha.Dispose()
+    }
+    $seal = [uint64][BitConverter]::ToUInt64($digest, 0)
+    $unpatched = [Convert]::ToUInt64("a5a5a5a5a5a5a5a5", 16)
+    if ($seal -eq 0 -or $seal -eq $unpatched) {
+        $seal = [Convert]::ToUInt64("6a09e667f3bcc909", 16)
+    }
+    return $seal
+}
+
 function Get-ObfLayoutSeed {
     param([string]$Value)
 
@@ -418,7 +436,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 $seedFingerprint = Get-Sha256Text -Value ("go-obf-seed-v1/" + $Seed)
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v11"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v12"
 }
 $Cache = Resolve-UserPath -Value $Cache
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -503,6 +521,7 @@ try {
 
     $entryKey = $null
     $magic = $null
+    $bootstrapSeal = $null
     $layoutSeed = $null
     $fileNameKey = $null
     $ldflags = @()
@@ -520,6 +539,10 @@ try {
     if (-not $NoObfuscateMagic) {
         $magic = Get-ObfPclnMagic -Value $Seed
         $ldflags += @("-obfmagic", "-obfmagicvalue=$magic")
+    }
+    if ($runtimeChecksEnabled) {
+        $bootstrapSeal = Get-ObfRuntimeGuardV2Seal -Value $Seed
+        $ldflags += @("-obfguardv2", "-obfguardv2seal=$bootstrapSeal")
     }
     if (-not $NoRandomizeLayout) {
         $layoutSeed = Get-ObfLayoutSeed -Value $Seed
@@ -545,7 +568,7 @@ try {
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
     Write-Host "pclntab:  $(if ($NoObfuscateMagic) { 'standard-magic' } else { 'seed-magic' })"
-    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v1' } else { 'disabled' })"
+    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v2' } else { 'disabled' })"
     Write-Host "layout:   $(if ($NoRandomizeLayout) { 'stable' } else { 'seed-randomized' })"
     Write-Host "files:    $(if ($NoObfuscateFileNames) { 'original' } else { 'hashed-pclntab' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -660,6 +683,13 @@ try {
             $entryKeyBytesForProfile = Convert-BytesToHex -Value $entryKeyBytes
             $entryKeyCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $entryKeyBytes
         }
+        $bootstrapSealBytesForProfile = $null
+        $bootstrapSealCount = 0
+        if ($runtimeChecksEnabled) {
+            $bootstrapSealBytes = Get-LittleEndianBytes -Value ([uint64]$bootstrapSeal) -Width 8
+            $bootstrapSealBytesForProfile = Convert-BytesToHex -Value $bootstrapSealBytes
+            $bootstrapSealCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $bootstrapSealBytes
+        }
         $driverVersion = ""
         try {
             $versionOutput = @(& $go version 2>$null)
@@ -750,9 +780,9 @@ try {
                 pclntabMagic = $magicKind
                 functionLayout = if ($NoRandomizeLayout) { "stable" } else { "seed-randomized" }
                 fileNames = if ($NoObfuscateFileNames) { "original" } else { "hashed-pclntab" }
-                stringRuntime = "v2+v3-ephemeral"
+                stringRuntime = "v2+v3-ephemeral+v4-stream"
                 vm = "v4-budgeted"
-                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v1" } else { "disabled" }
+                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v2" } else { "disabled" }
             }
             artifact = [ordered]@{
                 path = $outPath
@@ -787,6 +817,11 @@ try {
                     enabled = (-not $NoObfuscateEntryOff)
                     littleEndian = $entryKeyBytesForProfile
                     count = $entryKeyCount
+                }
+                runtimeGuardV2 = [ordered]@{
+                    enabled = $runtimeChecksEnabled
+                    littleEndian = $bootstrapSealBytesForProfile
+                    count = $bootstrapSealCount
                 }
             }
         }
@@ -827,7 +862,7 @@ try {
                     CGO_ENABLED = $targetCgo
                 }
                 protection = [ordered]@{
-                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v1" } else { "disabled" }
+                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v2" } else { "disabled" }
                 }
             }
             $temporaryManifest = "$manifestPath.tmp.$PID"

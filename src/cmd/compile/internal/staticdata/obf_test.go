@@ -88,6 +88,18 @@ func TestObfuscatedStringKeyV3SeparateDomain(t *testing.T) {
 	}
 }
 
+func TestObfuscatedStringKeyV4SeparateDomain(t *testing.T) {
+	v2 := obfuscatedStringKeyV2("pkg.fn", "seed-a", "literal-a")
+	v3 := obfuscatedStringKeyV3("pkg.fn", "seed-a", "literal-a")
+	v4 := obfuscatedStringKeyV4("pkg.fn", "seed-a", "literal-a")
+	if v4 == v2 || v4 == v3 {
+		t.Fatal("String v4 reused an earlier string key domain")
+	}
+	if again := obfuscatedStringKeyV4("pkg.fn", "seed-a", "literal-a"); again != v4 {
+		t.Fatalf("String v4 is not deterministic: %#v != %#v", again, v4)
+	}
+}
+
 func BenchmarkObfuscatedStringKeyV2(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		obfuscatedStringKeyV2Sink = obfuscatedStringKeyV2(

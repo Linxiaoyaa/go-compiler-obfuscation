@@ -473,6 +473,7 @@ var passes = [...]pass{
 	{name: "divmod", fn: divmod, required: true},
 	{name: "middle opt", fn: opt, required: true},
 	{name: "early fuse", fn: fuseEarly},
+	{name: "obf stream", fn: obfStream, required: true},
 	{name: "obf ephemeral", fn: obfEphemeral, required: true},
 	{name: "expand calls", fn: expandCalls, required: true},
 	{name: "decompose builtin", fn: postExpandCallsDecompose, required: true},

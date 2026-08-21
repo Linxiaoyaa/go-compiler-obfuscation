@@ -25,3 +25,22 @@ func TestObfRuntimeGuardV1Values(t *testing.T) {
 		t.Fatalf("seed did not change runtime guard seal")
 	}
 }
+
+func TestObfRuntimeGuardV2Values(t *testing.T) {
+	seed := "runtime-guard-v2-test-seed"
+	tag, seal, bootstrap := ObfRuntimeGuardV2Values(seed, "example.com/test.protected")
+	if tag == 0 || seal == 0 || bootstrap == 0 {
+		t.Fatalf("runtime guard v2 values must be non-zero: tag=%#x seal=%#x bootstrap=%#x", tag, seal, bootstrap)
+	}
+	if bootstrap != ObfRuntimeGuardV2BootstrapSeal(seed) {
+		t.Fatal("runtime guard v2 bootstrap derivation changed")
+	}
+	_, otherSeal, otherBootstrap := ObfRuntimeGuardV2Values(seed, "example.com/test.other")
+	if otherSeal == seal || otherBootstrap != bootstrap {
+		t.Fatal("runtime guard v2 function binding is invalid")
+	}
+	_, seedSeal, seedBootstrap := ObfRuntimeGuardV2Values("runtime-guard-v2-other-seed", "example.com/test.protected")
+	if seedSeal == seal || seedBootstrap == bootstrap {
+		t.Fatal("runtime guard v2 seed did not alter all seals")
+	}
+}

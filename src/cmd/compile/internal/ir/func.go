@@ -132,7 +132,7 @@ type Func struct {
 	// within a package.
 	ABIRefs obj.ABISet
 
-	Protection ProtectionFlag // custom //go:obf, //go:encrypt, //go:vm, //go:ephemeral, and //go:noprotect directives
+	Protection ProtectionFlag // custom //go:obf, //go:encrypt, //go:vm, //go:ephemeral, //go:stream, and //go:noprotect directives
 
 	NumDefers  int32 // number of defer calls in the function
 	NumReturns int32 // number of explicit returns in the function

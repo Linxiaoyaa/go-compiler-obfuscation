@@ -463,6 +463,7 @@ const (
 	ProtectVirtualize
 	ProtectExclude
 	ProtectEphemeral
+	ProtectStream
 )
 
 var BlankNode *Name

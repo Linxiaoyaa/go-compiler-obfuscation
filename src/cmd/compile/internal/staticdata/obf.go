@@ -90,6 +90,15 @@ func ObfuscatedStringSymV3(pos src.XPos, functionName, seed, text string) (*obj.
 	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v3")
 }
 
+// ObfuscatedStringSymV4 emits ciphertext for a stream-only protected literal.
+// String v4 never decodes the complete literal into a Go string. Its key and
+// ciphertext domains are deliberately separate from v2 and v3 so a policy
+// change cannot reuse a prior protected payload.
+func ObfuscatedStringSymV4(pos src.XPos, functionName, seed, text string) (*obj.LSym, ObfuscatedStringKey) {
+	key := obfuscatedStringKeyV4(functionName, seed, text)
+	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v4")
+}
+
 func obfuscatedStringSym(pos src.XPos, text string, key ObfuscatedStringKey, symbolDomain string) (*obj.LSym, ObfuscatedStringKey) {
 	ciphertext := make([]byte, len(text))
 	for i := range ciphertext {
@@ -122,6 +131,22 @@ func obfuscatedStringKeyV3(functionName, seed, text string) ObfuscatedStringKey 
 			binary.LittleEndian.Uint64(mask[off:off+8])
 	}
 	key.Decoder = (literal[1] ^ literal[17]) & 3
+	return key
+}
+
+func obfuscatedStringKeyV4(functionName, seed, text string) ObfuscatedStringKey {
+	root := hashParts([]byte("go-obf-string-v4/root"), []byte(seed))
+	function := hashParts(root[:], []byte("function"), []byte(functionName))
+	literal := hashParts(function[:], []byte("stream-literal"), []byte(text))
+	mask := hashParts(literal[:], []byte("stream-byte-mask"))
+
+	var key ObfuscatedStringKey
+	for i := range key.Lanes {
+		off := i * 8
+		key.Lanes[i] = binary.LittleEndian.Uint64(literal[off:off+8]) ^
+			binary.LittleEndian.Uint64(mask[off:off+8])
+	}
+	key.Decoder = (literal[7] ^ literal[23]) & 3
 	return key
 }
 

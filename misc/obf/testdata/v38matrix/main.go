@@ -21,8 +21,15 @@ func secretCheck() bool {
 	return len(s) == 28 && s[0] == 'v' && s[27] == 'l'
 }
 
+//go:encrypt
+//go:stream
+func streamCheck(last int) bool {
+	s := "v4-stream-byte-check"
+	return len(s) == 20 && s[0] == 'v' && s[last] == 'k'
+}
+
 func main() {
-	if !secretCheck() || vmCalc(7, 11) == 0 {
+	if !secretCheck() || !streamCheck(19) || vmCalc(7, 11) == 0 {
 		panic("v38 matrix failure")
 	}
 }
