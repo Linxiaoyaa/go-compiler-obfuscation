@@ -20,6 +20,46 @@ $oldGoarch = $env:GOARCH
 $oldCgo = $env:CGO_ENABLED
 $oldSeed = $env:GO_OBF_SEED
 try {
+    $negativeFixture = Join-Path $PSScriptRoot "testdata\v4negative"
+    $negativeArtifact = Join-Path $OutDir "v4negative.exe"
+    $negativeCache = Join-Path $OutDir "v4negative-cache"
+    $powerShell = Join-Path $PSHOME "pwsh.exe"
+    if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
+        $powerShell = Join-Path $PSHOME "powershell.exe"
+    }
+    if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
+        throw "PowerShell host was not found for the negative fixture"
+    }
+    Remove-Item -LiteralPath $negativeArtifact -Force -ErrorAction SilentlyContinue
+    $env:GOOS = "windows"
+    $env:GOARCH = "amd64"
+    $env:CGO_ENABLED = "0"
+    $env:GO_OBF_SEED = "v4-negative-matrix"
+    $negativeOutput = @()
+    $negativeExitCode = 0
+    Push-Location $negativeFixture
+    try {
+        $negativeOutput = @(& $powerShell -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot "build.ps1") `
+            -Package . `
+            -Out $negativeArtifact `
+            -Cache $negativeCache `
+            -VMBudget 512 2>&1)
+        $negativeExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    $negativeText = (@($negativeOutput | ForEach-Object { [string]$_ }) -join "`n")
+    if ($negativeExitCode -eq 0) {
+        throw "String v4 negative fixture unexpectedly compiled"
+    }
+    if ($negativeText -notmatch "StaticLECall") {
+        throw "String v4 negative fixture failed without the expected escape diagnostic"
+    }
+    if (Test-Path -LiteralPath $negativeArtifact -PathType Leaf) {
+        throw "String v4 negative fixture published an artifact after rejection"
+    }
+    Write-Output "negative pass: v4 stream escape rejected (exit=$negativeExitCode)"
+
     foreach ($tuple in $Target) {
         if ($tuple -notmatch '^([a-z0-9]+)/(\w+)$') {
             throw "invalid target tuple: $tuple"

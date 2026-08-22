@@ -163,3 +163,13 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   -ExpectedAbsent $env:OBF_FORBIDDEN_TEXT
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
+
+### Cross-platform and negative coverage
+
+`test-matrix.ps1` runs the protected fixture for `windows/amd64`, `linux/amd64`, and `linux/arm64` (override with `-Target`). Before the positive matrix it compiles `testdata/v4negative` with `//go:stream` applied to a string comparison and requires the compiler to reject the `StaticLECall` escape diagnostic. A zero exit, a missing diagnostic, or a published artifact fails the matrix. The negative check uses a fixed seed and an isolated cache so it is reproducible and does not affect release artifacts.
+
+```powershell
+& 'D:\Projection\GoProject\go-compiler\misc\obf\test-matrix.ps1' `
+  -OutDir .\work\v4-cross-platform
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
