@@ -90,6 +90,7 @@ function Invoke-Verifier {
         -RequireCompilerSource `
         -RequireTooling `
         -RequireRuntimeChecks `
+        -RequireStringV4 `
         -MinReportFunctions 2 `
         -MinV4Aliases 1 `
         -ExpectedSeedFingerprint $ExpectedSeedFingerprint `

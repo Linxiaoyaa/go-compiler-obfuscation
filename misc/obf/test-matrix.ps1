@@ -60,6 +60,7 @@ try {
             RequireCompilerSource = $true
             RequireTooling = $true
             RequireRuntimeChecks = $true
+            RequireStringV4 = $true
             RequireFunction = @("main.vmCalc", "main.secretCheck", "main.streamCheck")
             MinReportFunctions = 3
             MinV4Aliases = 1

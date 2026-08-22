@@ -20,6 +20,7 @@ param(
     [switch]$RequireTooling,
     [switch]$RequireCleanCompiler,
     [switch]$RequireRuntimeChecks,
+    [switch]$RequireStringV4,
     [string[]]$RequireFunction = @(),
     [int]$MinReportFunctions = -1,
     [int]$MinV4Aliases = -1,
@@ -528,6 +529,15 @@ if ($RequireRuntimeChecks) {
         $guardV2MarkerOK = $guardV2Count -gt 0 -and $recordedGuardV2Count -eq $guardV2Count
         Add-Check -Name "runtime-checks.bootstrap-marker" -Status $(if ($guardV2MarkerOK) { "pass" } else { "fail" }) -Expected "recorded non-zero count" -Actual "$guardV2Count/$recordedGuardV2Count"
     }
+}
+
+if ($RequireStringV4) {
+    $stringRuntime = if ($null -eq $protection) { "" } else { [string]$protection.stringRuntime }
+    Add-Check -Name "string-v4.profile" -Status $(if ($stringRuntime -match '(^|\+)v4-stream($|\+)') { "pass" } else { "fail" }) -Expected "v4-stream" -Actual $stringRuntime
+    $streamFunctions = @($protectedFunctions | Where-Object {
+        ([string]$_.applied) -match '(^|\s)encrypt=str-runtime-v4-stream(\s|$)'
+    })
+    Add-Check -Name "string-v4.coverage" -Status $(if ($streamFunctions.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $streamFunctions.Count
 }
 
 $nameMode = if ($null -eq $protection) { "" } else { [string]$protection.names }
