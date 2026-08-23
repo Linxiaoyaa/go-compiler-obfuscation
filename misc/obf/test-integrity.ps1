@@ -90,6 +90,7 @@ function Invoke-Verifier {
         -RequireCompilerSource `
         -RequireTooling `
         -RequireRuntimeChecks `
+        -RequireRuntimeGuardV3 `
         -RequireStringV4 `
         -MinReportFunctions 2 `
         -MinV4Aliases 1 `
@@ -266,20 +267,36 @@ Assert-ExpectedFailure -Name "runtime-check-mode-tamper" -Fixture $runtimeCase -
     -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
     -ExpectedCheck "runtime-checks.profile"
 
-# Keep the declared v2 mode but remove the patched bootstrap marker. This
-# verifies that a self-consistent release record cannot omit the independent
-# Guard v2 image binding.
-$guardV2Case = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v2-marker-tamper") `
+# Keep the profile and manifest internally consistent while downgrading only
+# the declared version. Release verification must reject v2 even though the
+# compatibility runtime-check switch still accepts historical v2 artifacts.
+$runtimeDowngradeCase = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v3-downgrade") `
     -SourceArtifact $sourceArtifact -SourceProfile $sourceProfile -SourceManifest $sourceManifest
-$guardV2Profile = Get-Content -LiteralPath $guardV2Case.profile -Raw | ConvertFrom-Json
-$guardV2Profile.markers.runtimeGuardV2.enabled = $false
-Save-Json -Path $guardV2Case.profile -Object $guardV2Profile
-$guardV2Manifest = Get-Content -LiteralPath $guardV2Case.manifest -Raw | ConvertFrom-Json
-$guardV2Manifest.profile.sha256 = Get-FileSha256 -Path $guardV2Case.profile
-Save-Json -Path $guardV2Case.manifest -Object $guardV2Manifest
-Assert-ExpectedFailure -Name "runtime-guard-v2-marker-tamper" -Fixture $guardV2Case -VerifierPath $verifierPath `
+$runtimeDowngradeProfile = Get-Content -LiteralPath $runtimeDowngradeCase.profile -Raw | ConvertFrom-Json
+$runtimeDowngradeProfile.protection.runtimeChecks = "entry-v2"
+Save-Json -Path $runtimeDowngradeCase.profile -Object $runtimeDowngradeProfile
+$runtimeDowngradeManifest = Get-Content -LiteralPath $runtimeDowngradeCase.manifest -Raw | ConvertFrom-Json
+$runtimeDowngradeManifest.profile.sha256 = Get-FileSha256 -Path $runtimeDowngradeCase.profile
+$runtimeDowngradeManifest.protection.runtimeChecks = "entry-v2"
+Save-Json -Path $runtimeDowngradeCase.manifest -Object $runtimeDowngradeManifest
+Assert-ExpectedFailure -Name "runtime-guard-v3-downgrade" -Fixture $runtimeDowngradeCase -VerifierPath $verifierPath `
     -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
-    -ExpectedCheck "runtime-checks.bootstrap-profile"
+    -ExpectedCheck "runtime-checks.profile"
+
+# Keep the declared v3 mode but remove the multi-lane image marker. This
+# verifies that a self-consistent release record cannot omit the independent
+# Guard v3 image and platform binding.
+$guardV3Case = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v3-marker-tamper") `
+    -SourceArtifact $sourceArtifact -SourceProfile $sourceProfile -SourceManifest $sourceManifest
+$guardV3Profile = Get-Content -LiteralPath $guardV3Case.profile -Raw | ConvertFrom-Json
+$guardV3Profile.markers.runtimeGuardV3.enabled = $false
+Save-Json -Path $guardV3Case.profile -Object $guardV3Profile
+$guardV3Manifest = Get-Content -LiteralPath $guardV3Case.manifest -Raw | ConvertFrom-Json
+$guardV3Manifest.profile.sha256 = Get-FileSha256 -Path $guardV3Case.profile
+Save-Json -Path $guardV3Case.manifest -Object $guardV3Manifest
+Assert-ExpectedFailure -Name "runtime-guard-v3-marker-tamper" -Fixture $guardV3Case -VerifierPath $verifierPath `
+    -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
+    -ExpectedCheck "runtime-checks.v3.profile"
 
 Write-Output "integrity negative suite passed"
 exit 0

@@ -39,6 +39,13 @@ const obfRuntimeGuardV2SealSym = "runtime.obfRuntimeGuardV2Seal"
 
 const obfRuntimeGuardV2Unpatched uint64 = 0xa5a5a5a5a5a5a5a5
 
+const (
+	obfRuntimeGuardV3SealSym      = "runtime.obfRuntimeGuardV3Seal"
+	obfRuntimeGuardV3BootstrapSym = "runtime.obfRuntimeGuardV3Bootstrap"
+	obfRuntimeGuardV3PlatformSym  = "runtime.obfRuntimeGuardV3Platform"
+	obfRuntimeGuardV3Unpatched    = uint64(0xa5a5a5a5a5a5a5a5)
+)
+
 // pclntab holds the state needed for pclntab generation.
 type pclntab struct {
 	// The first and last functions found.
@@ -454,6 +461,68 @@ func (ctxt *Link) configureObfRuntimeGuardV2() {
 	first, second := obfRuntimeGuardV2SealWords(ctxt.Arch.ByteOrder, seal)
 	updater.SetUint32(ctxt.Arch, 0, first)
 	updater.SetUint32(ctxt.Arch, 4, second)
+}
+
+func (ctxt *Link) configureObfRuntimeGuardV3() {
+	if !*flagObfGuardV3 {
+		return
+	}
+	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
+		Exitf("-obfguardv3 is supported only for executable and PIE builds")
+	}
+	if !*flagObfEntryOff || !*flagObfPclnMagic {
+		Exitf("-obfguardv3 requires -obfentryoff and -obfmagic")
+	}
+	values := []struct {
+		flag uint64
+		name string
+	}{
+		{*flagObfGuardV3SealLo, "-obfguardv3seallo"},
+		{*flagObfGuardV3SealHi, "-obfguardv3sealhi"},
+		{*flagObfGuardV3Bootstrap, "-obfguardv3bootstrap"},
+		{*flagObfGuardV3Platform, "-obfguardv3platform"},
+	}
+	for _, value := range values {
+		if value.flag == 0 || value.flag == obfRuntimeGuardV3Unpatched {
+			Exitf("%s must be a non-zero non-sentinel 64-bit value", value.name)
+		}
+	}
+	sealSym := ctxt.loader.Lookup(obfRuntimeGuardV3SealSym, 0)
+	if sealSym == 0 {
+		Exitf("-obfguardv3 requires %s", obfRuntimeGuardV3SealSym)
+	}
+	sealUpdater := ctxt.loader.MakeSymbolUpdater(sealSym)
+	if sealUpdater.Size() < 16 {
+		Exitf("%s is too small for -obfguardv3", obfRuntimeGuardV3SealSym)
+	}
+	first, second := obfRuntimeGuardV3SealWords(ctxt.Arch.ByteOrder, *flagObfGuardV3SealLo)
+	sealUpdater.SetUint32(ctxt.Arch, 0, first)
+	sealUpdater.SetUint32(ctxt.Arch, 4, second)
+	first, second = obfRuntimeGuardV3SealWords(ctxt.Arch.ByteOrder, *flagObfGuardV3SealHi)
+	sealUpdater.SetUint32(ctxt.Arch, 8, first)
+	sealUpdater.SetUint32(ctxt.Arch, 12, second)
+	patchGuardV3Word(ctxt, obfRuntimeGuardV3BootstrapSym, *flagObfGuardV3Bootstrap)
+	patchGuardV3Word(ctxt, obfRuntimeGuardV3PlatformSym, *flagObfGuardV3Platform)
+}
+
+func patchGuardV3Word(ctxt *Link, name string, value uint64) {
+	sym := ctxt.loader.Lookup(name, 0)
+	if sym == 0 {
+		Exitf("-obfguardv3 requires %s", name)
+	}
+	updater := ctxt.loader.MakeSymbolUpdater(sym)
+	if updater.Size() < 8 {
+		Exitf("%s is too small for -obfguardv3", name)
+	}
+	first, second := obfRuntimeGuardV3SealWords(ctxt.Arch.ByteOrder, value)
+	updater.SetUint32(ctxt.Arch, 0, first)
+	updater.SetUint32(ctxt.Arch, 4, second)
+}
+
+func obfRuntimeGuardV3SealWords(order binary.ByteOrder, seal uint64) (uint32, uint32) {
+	var encoded [8]byte
+	order.PutUint64(encoded[:], seal)
+	return order.Uint32(encoded[:4]), order.Uint32(encoded[4:])
 }
 
 func obfRuntimeGuardV2SealWords(order binary.ByteOrder, seal uint64) (uint32, uint32) {
@@ -1177,6 +1246,7 @@ func (ctxt *Link) pclntab(container loader.Bitmap) *pclntab {
 	inlSyms := makeInlSyms(ctxt, funcs, nameOffsets)
 	ctxt.configureObfEntryOff()
 	ctxt.configureObfRuntimeGuardV2()
+	ctxt.configureObfRuntimeGuardV3()
 	state.generateFunctab(ctxt, funcs, inlSyms, cuOffsets, nameOffsets)
 	state.generateFuncdata(ctxt, funcs, inlSyms)
 

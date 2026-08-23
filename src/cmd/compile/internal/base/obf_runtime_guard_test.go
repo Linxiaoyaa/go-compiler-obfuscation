@@ -44,3 +44,26 @@ func TestObfRuntimeGuardV2Values(t *testing.T) {
 		t.Fatal("runtime guard v2 seed did not alter all seals")
 	}
 }
+
+func TestObfRuntimeGuardV3Values(t *testing.T) {
+	seed := "runtime-guard-v3-test-seed"
+	values := func(target string) (uint64, uint64, uint64, uint64, uint64, uint64) {
+		return ObfRuntimeGuardV3ValuesForTarget(seed, "example.com/test.protected", target)
+	}
+	tag, seal, bootstrap, imageLo, imageHi, platform := values("windows/amd64")
+	if tag == 0 || seal == 0 || bootstrap == 0 || imageLo == 0 || imageHi == 0 || platform == 0 {
+		t.Fatalf("runtime guard v3 values must be non-zero: tag=%#x seal=%#x bootstrap=%#x lo=%#x hi=%#x platform=%#x", tag, seal, bootstrap, imageLo, imageHi, platform)
+	}
+	tagAgain, sealAgain, bootstrapAgain, loAgain, hiAgain, platformAgain := values("windows/amd64")
+	if tag != tagAgain || seal != sealAgain || bootstrap != bootstrapAgain || imageLo != loAgain || imageHi != hiAgain || platform != platformAgain {
+		t.Fatal("runtime guard v3 derivation is not deterministic")
+	}
+	_, otherSeal, otherBootstrap, otherLo, otherHi, otherPlatform := values("linux/amd64")
+	if seal == otherSeal || bootstrap == otherBootstrap || imageLo == otherLo || imageHi == otherHi || platform == otherPlatform {
+		t.Fatal("runtime guard v3 target binding did not change all image values")
+	}
+	_, seedSeal, _, seedLo, seedHi, _ := ObfRuntimeGuardV3ValuesForTarget("runtime-guard-v3-other-seed", "example.com/test.protected", "windows/amd64")
+	if seedSeal == seal || seedLo == imageLo || seedHi == imageHi {
+		t.Fatal("runtime guard v3 seed did not alter image binding")
+	}
+}

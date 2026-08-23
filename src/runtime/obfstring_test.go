@@ -78,6 +78,22 @@ func TestObfStringDataV4ByteStream(t *testing.T) {
 	}
 }
 
+func TestObfStringDataV5LeaseStream(t *testing.T) {
+	plain := []byte("string-v5-lease-bound-byte-stream")
+	lanes := [4]uint64{0x13579bdf2468ace0, 0x1020304050607080, 0xfedcba9876543210, 0x0f1e2d3c4b5a6978}
+	const lease = uint64(0x6a09e667f3bcc909)
+	for decoder := 0; decoder < 4; decoder++ {
+		ciphertext := make([]byte, len(plain))
+		for i := range ciphertext {
+			ciphertext[i] = plain[i] ^ obfStringMaskV5ForTest(lanes, lease, uint8(decoder), i)
+		}
+		got := runtime.ObfStringDataV5ForTest(uint8(decoder), ciphertext, lanes, lease)
+		if !bytes.Equal(got, plain) {
+			t.Fatalf("decoder %d lease stream = %q; want %q", decoder, got, plain)
+		}
+	}
+}
+
 func obfStringMaskForTest(lanes [4]uint64, decoder uint8, index int) byte {
 	i := uint64(index)
 	a, b, c, d := lanes[0], lanes[1], lanes[2], lanes[3]
@@ -106,6 +122,17 @@ func obfStringMaskForTest(lanes [4]uint64, decoder uint8, index int) byte {
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
 	return byte(x >> uint((i&7)*8))
+}
+
+func obfStringMaskV5ForTest(lanes [4]uint64, lease uint64, decoder uint8, index int) byte {
+	i := uint64(index)
+	x := lease ^ lanes[(uint64(decoder)+i)&3]
+	x += i*0xd6e8feb86659fd93 + 0xa4093822299f31d0
+	x ^= rotateObf64Test(lanes[(uint64(decoder)+i+1)&3]^lease, uint((i+uint64(decoder)*11)&63))
+	x ^= x >> 29
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return obfStringMaskForTest(lanes, decoder, index) ^ byte(x>>uint((i&7)*8))
 }
 
 func rotateObf64Test(x uint64, n uint) uint64 {

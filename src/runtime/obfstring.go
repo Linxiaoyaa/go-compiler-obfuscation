@@ -199,6 +199,94 @@ func obfStringByteV4(src *byte, n, index int, k0, k1, k2, k3 uint64, decoder uin
 	return value
 }
 
+// String v5 keeps the String v4 no-plaintext representation, but adds an
+// independently derived lease word to every token and byte decoder. The lease
+// is scoped to a single decoder invocation and wiped with the temporary key
+// schedule before the byte result crosses the runtime boundary.
+
+//go:noinline
+func obfStringTokenV5A(src *byte, n int, k0, k1, k2, k3, lease uint64) (*byte, int) {
+	return obfStringTokenV5(src, n, k0, k1, k2, k3, lease, 0)
+}
+
+//go:noinline
+func obfStringTokenV5B(src *byte, n int, k0, k1, k2, k3, lease uint64) (*byte, int) {
+	return obfStringTokenV5(src, n, k0, k1, k2, k3, lease, 1)
+}
+
+//go:noinline
+func obfStringTokenV5C(src *byte, n int, k0, k1, k2, k3, lease uint64) (*byte, int) {
+	return obfStringTokenV5(src, n, k0, k1, k2, k3, lease, 2)
+}
+
+//go:noinline
+func obfStringTokenV5D(src *byte, n int, k0, k1, k2, k3, lease uint64) (*byte, int) {
+	return obfStringTokenV5(src, n, k0, k1, k2, k3, lease, 3)
+}
+
+func obfStringTokenV5(src *byte, n int, k0, k1, k2, k3, lease uint64, decoder uint8) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	if src == nil || lease == 0 {
+		throw("invalid protected string lease token")
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	if key[0]^key[1]^key[2]^key[3]^lease^uint64(n)^uint64(decoder) == 0x510e527fade682d1 {
+		throw("invalid protected string lease token")
+	}
+	obfStringWipeV2(&key)
+	obfStringWipeV5(&lease)
+	return src, n
+}
+
+//go:noinline
+func obfStringByteV5A(src *byte, n, index int, k0, k1, k2, k3, lease uint64) byte {
+	return obfStringByteV5(src, n, index, k0, k1, k2, k3, lease, 0)
+}
+
+//go:noinline
+func obfStringByteV5B(src *byte, n, index int, k0, k1, k2, k3, lease uint64) byte {
+	return obfStringByteV5(src, n, index, k0, k1, k2, k3, lease, 1)
+}
+
+//go:noinline
+func obfStringByteV5C(src *byte, n, index int, k0, k1, k2, k3, lease uint64) byte {
+	return obfStringByteV5(src, n, index, k0, k1, k2, k3, lease, 2)
+}
+
+//go:noinline
+func obfStringByteV5D(src *byte, n, index int, k0, k1, k2, k3, lease uint64) byte {
+	return obfStringByteV5(src, n, index, k0, k1, k2, k3, lease, 3)
+}
+
+func obfStringByteV5(src *byte, n, index int, k0, k1, k2, k3, lease uint64, decoder uint8) byte {
+	if src == nil || n <= 0 || index < 0 || index >= n || lease == 0 {
+		throw("protected string lease byte index out of range")
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	value := *(*byte)(add(unsafe.Pointer(src), uintptr(index))) ^ obfStringMaskV5(key, lease, decoder, index)
+	obfStringWipeV2(&key)
+	obfStringWipeV5(&lease)
+	return value
+}
+
+func obfStringMaskV5(key obfStringKeyV2, lease uint64, decoder uint8, index int) byte {
+	i := uint64(index)
+	x := lease ^ key[(uint64(decoder)+i)&3]
+	x += i*0xd6e8feb86659fd93 + 0xa4093822299f31d0
+	x ^= rotateObf64(key[(uint64(decoder)+i+1)&3]^lease, uint((i+uint64(decoder)*11)&63))
+	x ^= x >> 29
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return obfStringMaskV3(key, decoder, index) ^ byte(x>>uint((i&7)*8))
+}
+
+//go:noinline
+func obfStringWipeV5(lease *uint64) {
+	*lease = 0
+}
+
 //go:noinline
 func obfStringDataV2A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
 	if n <= 0 {

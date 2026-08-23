@@ -1,5 +1,5 @@
 param(
-    [string[]]$Target = @("windows/amd64", "linux/amd64", "linux/arm64"),
+    [string[]]$Target = @("windows/amd64", "linux/amd64", "linux/arm64", "linux/riscv64", "darwin/amd64", "darwin/arm64"),
     [string]$OutDir = "",
     [switch]$RequireCleanCompiler
 )
@@ -20,9 +20,6 @@ $oldGoarch = $env:GOARCH
 $oldCgo = $env:CGO_ENABLED
 $oldSeed = $env:GO_OBF_SEED
 try {
-    $negativeFixture = Join-Path $PSScriptRoot "testdata\v4negative"
-    $negativeArtifact = Join-Path $OutDir "v4negative.exe"
-    $negativeCache = Join-Path $OutDir "v4negative-cache"
     $powerShell = Join-Path $PSHOME "pwsh.exe"
     if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
         $powerShell = Join-Path $PSHOME "powershell.exe"
@@ -30,35 +27,43 @@ try {
     if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
         throw "PowerShell host was not found for the negative fixture"
     }
-    Remove-Item -LiteralPath $negativeArtifact -Force -ErrorAction SilentlyContinue
-    $env:GOOS = "windows"
-    $env:GOARCH = "amd64"
-    $env:CGO_ENABLED = "0"
-    $env:GO_OBF_SEED = "v4-negative-matrix"
-    $negativeOutput = @()
-    $negativeExitCode = 0
-    Push-Location $negativeFixture
-    try {
-        $negativeOutput = @(& $powerShell -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot "build.ps1") `
-            -Package . `
-            -Out $negativeArtifact `
-            -Cache $negativeCache `
-            -VMBudget 512 2>&1)
-        $negativeExitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
+    foreach ($negative in @(
+        [pscustomobject]@{ Name = "v4"; Fixture = "v4negative" },
+        [pscustomobject]@{ Name = "v5"; Fixture = "v5negative" }
+    )) {
+        $negativeFixture = Join-Path $PSScriptRoot ("testdata\" + $negative.Fixture)
+        $negativeArtifact = Join-Path $OutDir ($negative.Fixture + ".exe")
+        $negativeCache = Join-Path $OutDir ($negative.Fixture + "-cache")
+        Remove-Item -LiteralPath $negativeArtifact -Force -ErrorAction SilentlyContinue
+        $env:GOOS = "windows"
+        $env:GOARCH = "amd64"
+        $env:CGO_ENABLED = "0"
+        $env:GO_OBF_SEED = ($negative.Name + "-negative-matrix")
+        $negativeOutput = @()
+        $negativeExitCode = 0
+        Push-Location $negativeFixture
+        try {
+            $negativeOutput = @(& $powerShell -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot "build.ps1") `
+                -Package . `
+                -Out $negativeArtifact `
+                -Cache $negativeCache `
+                -VMBudget 512 2>&1)
+            $negativeExitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        $negativeText = (@($negativeOutput | ForEach-Object { [string]$_ }) -join "`n")
+        if ($negativeExitCode -eq 0) {
+            throw "String $($negative.Name) negative fixture unexpectedly compiled"
+        }
+        if ($negativeText -notmatch "StaticLECall") {
+            throw "String $($negative.Name) negative fixture failed without the expected escape diagnostic"
+        }
+        if (Test-Path -LiteralPath $negativeArtifact -PathType Leaf) {
+            throw "String $($negative.Name) negative fixture published an artifact after rejection"
+        }
+        Write-Output "negative pass: $($negative.Name) stream escape rejected (exit=$negativeExitCode)"
     }
-    $negativeText = (@($negativeOutput | ForEach-Object { [string]$_ }) -join "`n")
-    if ($negativeExitCode -eq 0) {
-        throw "String v4 negative fixture unexpectedly compiled"
-    }
-    if ($negativeText -notmatch "StaticLECall") {
-        throw "String v4 negative fixture failed without the expected escape diagnostic"
-    }
-    if (Test-Path -LiteralPath $negativeArtifact -PathType Leaf) {
-        throw "String v4 negative fixture published an artifact after rejection"
-    }
-    Write-Output "negative pass: v4 stream escape rejected (exit=$negativeExitCode)"
 
     foreach ($tuple in $Target) {
         if ($tuple -notmatch '^([a-z0-9]+)/(\w+)$') {
@@ -72,7 +77,8 @@ try {
         $env:CGO_ENABLED = "0"
         $env:GO_OBF_SEED = "v38-matrix-$name"
 
-        $artifact = Join-Path $OutDir "$name.exe"
+        $artifactSuffix = if ($goos -eq "windows") { ".exe" } else { "" }
+        $artifact = Join-Path $OutDir ("$name" + $artifactSuffix)
         $profile = Join-Path $OutDir "$name.profile.json"
         $manifest = Join-Path $OutDir "$name.manifest.json"
         Push-Location $fixture
@@ -83,7 +89,7 @@ try {
                 -Report $profile `
                 -Manifest $manifest `
                 -VMBudget 2048 `
-                -ScanPlaintext @("v38-cross-platform-ephemeral", "v4-stream-byte-check")
+                -ScanPlaintext @("v38-cross-platform-ephemeral", "v4-stream-byte-check", "v5-lease-stream-check")
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         } finally {
             Pop-Location
@@ -100,11 +106,13 @@ try {
             RequireCompilerSource = $true
             RequireTooling = $true
             RequireRuntimeChecks = $true
+            RequireRuntimeGuardV3 = $true
             RequireStringV4 = $true
-            RequireFunction = @("main.vmCalc", "main.secretCheck", "main.streamCheck")
-            MinReportFunctions = 3
+            RequireStringV5 = $true
+            RequireFunction = @("main.vmCalc", "main.secretCheck", "main.streamCheck", "main.leaseStreamCheck")
+            MinReportFunctions = 4
             MinV4Aliases = 1
-            ExpectedAbsent = @("v38-cross-platform-ephemeral", "v4-stream-byte-check")
+            ExpectedAbsent = @("v38-cross-platform-ephemeral", "v4-stream-byte-check", "v5-lease-stream-check")
             ForbiddenMetadata = @($env:GO_OBF_SEED, $root, $fixture)
         }
         if ($RequireCleanCompiler) {

@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral | ir.ProtectStream
+const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral | ir.ProtectStream | ir.ProtectStreamV5
 
 type vmOpcode uint8
 
@@ -135,6 +135,9 @@ func protectionFlagsString(flags ir.ProtectionFlag) string {
 	if flags&ir.ProtectStream != 0 {
 		names = append(names, "stream")
 	}
+	if flags&ir.ProtectStreamV5 != 0 {
+		names = append(names, "streamv5")
+	}
 	if flags&ir.ProtectExclude != 0 {
 		names = append(names, "noprotect")
 	}
@@ -213,7 +216,11 @@ func obfVirtualize(f *Func) {
 		applied += " obf=vm-dispatch-v3"
 	}
 	if runtimeCheck {
-		applied += " runtime=entry-v2"
+		runtimeMode := "entry-v2"
+		if base.Debug.ObfRuntimeCheck >= 3 {
+			runtimeMode = "entry-v3"
+		}
+		applied += " runtime=" + runtimeMode
 	}
 	reportProtection(f, flags, applied)
 }
@@ -259,7 +266,9 @@ func obfHarden(f *Func) {
 			}
 		}
 		if stringProtected {
-			if flags&ir.ProtectStream != 0 {
+			if flags&ir.ProtectStreamV5 != 0 {
+				applied = append(applied, "encrypt=str-runtime-v5-lease")
+			} else if flags&ir.ProtectStream != 0 {
 				applied = append(applied, "encrypt=str-runtime-v4-stream")
 			} else if flags&ir.ProtectEphemeral != 0 {
 				applied = append(applied, "encrypt=str-runtime-v3-ephemeral")
@@ -279,7 +288,11 @@ func obfHarden(f *Func) {
 		protectionError(f, "runtimecheck", "%v", err)
 		return
 	} else if runtimeCheck {
-		applied = append(applied, "runtime=entry-v2")
+		runtimeMode := "entry-v2"
+		if base.Debug.ObfRuntimeCheck >= 3 {
+			runtimeMode = "entry-v3"
+		}
+		applied = append(applied, "runtime="+runtimeMode)
 	}
 	reportProtection(f, flags, strings.Join(applied, " "))
 }
@@ -292,6 +305,9 @@ func installRuntimeGuard(f *Func) (bool, error) {
 	if base.Debug.ObfRuntimeCheck == 0 {
 		return false, nil
 	}
+	if base.Debug.ObfRuntimeCheck >= 3 {
+		return installRuntimeGuardV3(f)
+	}
 	if base.Debug.ObfSeed == "" {
 		return false, fmt.Errorf("runtime checks require a protection seed")
 	}
@@ -301,7 +317,7 @@ func installRuntimeGuard(f *Func) (bool, error) {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV2")) {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV2") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV3")) {
 				return false, nil
 			}
 		}
@@ -352,6 +368,73 @@ func installRuntimeGuard(f *Func) (bool, error) {
 	return true, nil
 }
 
+// installRuntimeGuardV3 emits the v3 entry gate. It adds independent image
+// lanes and a target-platform binding to the v2 function seal while retaining
+// the same memory-root ordering guarantee.
+func installRuntimeGuardV3(f *Func) (bool, error) {
+	if base.Debug.ObfSeed == "" {
+		return false, fmt.Errorf("runtime checks require a protection seed")
+	}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall && v.Op != OpStaticLECall {
+				continue
+			}
+			aux, ok := v.Aux.(*AuxCall)
+			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV3") {
+				return false, nil
+			}
+		}
+	}
+
+	entry := f.Entry
+	var initMem *Value
+	for _, v := range entry.Values {
+		if v.Op == OpInitMem {
+			initMem = v
+			break
+		}
+	}
+	if initMem == nil {
+		return false, fmt.Errorf("could not find entry memory")
+	}
+
+	tag, seal, bootstrap, imageLo, imageHi, platform := base.ObfRuntimeGuardV3Values(base.Debug.ObfSeed, protectionFunctionName(f))
+	rng := newProtectionRNGDomain(f, "runtime-guard-v3")
+	sp := entry.NewValue0(entry.Pos, OpSP, f.Config.Types.Uintptr)
+	source := entry.NewValue2(entry.Pos, OpConvert, f.Config.Types.UInt64, sp, initMem)
+	zero := opaqueZero64(entry, source)
+	values := [...]uint64{tag, seal, bootstrap, imageLo, imageHi, platform}
+	args := make([]*Value, len(values))
+	for i, value := range values {
+		args[i] = runtimeGuardConstant(entry, entry.Pos, value, rng, zero)
+	}
+	argTypes := make([]*types.Type, len(args))
+	for i := range argTypes {
+		argTypes[i] = f.Config.Types.UInt64
+	}
+	aux := StaticAuxCall(f.fe.Syslook("obfRuntimeGuardV3"), f.ABIDefault.ABIAnalyzeTypes(argTypes, nil))
+	call := entry.NewValue0A(entry.Pos, OpStaticCall, types.TypeResultMem, aux)
+	call.AddArgs(args...)
+	call.AddArg(initMem)
+	call.AuxInt = aux.ArgWidth()
+	guardMem := entry.NewValue1I(entry.Pos, OpSelectN, types.TypeMem, 0, call)
+
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v == source || v == call || v == guardMem {
+				continue
+			}
+			for i, arg := range v.Args {
+				if arg == initMem {
+					v.SetArg(i, guardMem)
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
 func runtimeGuardConstant(b *Block, pos src.XPos, value uint64, rng *protectionRNG, zero *Value) *Value {
 	mask := rng.next()
 	if mask == 0 {
@@ -374,7 +457,7 @@ func hasObfuscatedStringCall(f *Func) bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4")) {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV5")) {
 				return true
 			}
 		}
@@ -393,7 +476,7 @@ func obfuscatedStringKeyConstants(f *Func) map[*Value]bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4")) {
+			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV5")) {
 				continue
 			}
 			for _, arg := range v.Args {

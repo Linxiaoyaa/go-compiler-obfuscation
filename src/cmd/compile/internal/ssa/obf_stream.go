@@ -12,30 +12,34 @@ import (
 	"strings"
 )
 
-// obfStream implements String v4. The lowering initially constructs a string
-// header that points at ciphertext. Before calls are expanded, this pass proves
-// that every use is a length query or a byte load and replaces each byte load
-// with a runtime decoder call. No complete plaintext Go string is allocated or
-// materialized by this representation.
+// obfStream implements String v4 and v5. The lowering initially constructs a
+// string header that points at ciphertext. Before calls are expanded, this pass
+// proves that every use is a length query or a byte load and replaces each byte
+// load with a runtime decoder call. No complete plaintext Go string is
+// allocated or materialized by this representation.
 func obfStream(f *Func) {
 	flags := f.fe.Func().Protection
-	if flags&ir.ProtectStream == 0 || flags&ir.ProtectExclude != 0 {
+	if flags&(ir.ProtectStream|ir.ProtectStreamV5) == 0 || flags&ir.ProtectExclude != 0 {
 		return
+	}
+	directive := "stream"
+	if flags&ir.ProtectStreamV5 != 0 {
+		directive = "streamv5"
 	}
 
 	graph := newStreamGraph(f)
 	tokens, err := findStreamTokens(graph)
 	if err != nil {
-		protectionError(f, "stream", "%v", err)
+		protectionError(f, directive, "%v", err)
 		return
 	}
 	if len(tokens) == 0 {
-		protectionError(f, "stream", "no protected String v4 literal was lowered")
+		protectionError(f, directive, "no protected stream literal was lowered")
 		return
 	}
 	for _, token := range tokens {
 		if err := rewriteStreamToken(f, graph, token); err != nil {
-			protectionError(f, "stream", "%v", err)
+			protectionError(f, directive, "%v", err)
 			return
 		}
 	}
@@ -46,7 +50,9 @@ type streamToken struct {
 	stringValue        *Value
 	ciphertext, length *Value
 	keys               [4]*Value
+	lease              *Value
 	decoder            uint8
+	version            int
 	stringLengths      []*Value
 	loads              []streamLoad
 }
@@ -106,20 +112,28 @@ func findStreamTokens(graph streamGraph) ([]*streamToken, error) {
 		if !isStreamTokenCall(call) {
 			continue
 		}
-		decoder, ok := streamDecoder(call)
+		version, decoder, ok := streamDecoder(call)
 		// The late-call form carries six ABI arguments followed by the
 		// memory dependency. Keep the dependency in the graph so a token
 		// cannot be detached from the surrounding memory chain.
-		if !ok || len(call.Args) != 7 || call.Args[6].Type.Compare(types.TypeMem) != types.CMPeq {
-			return nil, fmt.Errorf("malformed String v4 token call")
+		expectedArgs := 7
+		if version == 5 {
+			expectedArgs = 8
+		}
+		if !ok || len(call.Args) != expectedArgs || call.Args[expectedArgs-1].Type.Compare(types.TypeMem) != types.CMPeq {
+			return nil, fmt.Errorf("malformed String v%d token call", version)
 		}
 		token := &streamToken{
 			call:       call,
 			ciphertext: call.Args[0],
 			length:     call.Args[1],
 			decoder:    decoder,
+			version:    version,
 		}
 		copy(token.keys[:], call.Args[2:6])
+		if version == 5 {
+			token.lease = call.Args[6]
+		}
 		pointerResults := streamTokenResults(graph, call, 0)
 		lengthResults := streamTokenResults(graph, call, 1)
 		for pointer := range pointerResults {
@@ -129,13 +143,13 @@ func findStreamTokens(graph streamGraph) ([]*streamToken, error) {
 					continue
 				}
 				if token.stringValue != nil {
-					return nil, fmt.Errorf("String v4 token feeds multiple string headers")
+					return nil, fmt.Errorf("String v%d token feeds multiple string headers", version)
 				}
 				token.stringValue = candidate
 			}
 		}
 		if token.stringValue == nil {
-			return nil, fmt.Errorf("could not find String v4 ciphertext header")
+			return nil, fmt.Errorf("could not find String v%d ciphertext header", version)
 		}
 		tokens = append(tokens, token)
 	}
@@ -147,25 +161,33 @@ func isStreamTokenCall(v *Value) bool {
 		return false
 	}
 	aux, ok := v.Aux.(*AuxCall)
-	return ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4")
+	return ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5"))
 }
 
-func streamDecoder(v *Value) (uint8, bool) {
+func streamDecoder(v *Value) (int, uint8, bool) {
 	aux, ok := v.Aux.(*AuxCall)
 	if !ok || aux.Fn == nil || len(aux.Fn.Name) == 0 {
-		return 0, false
+		return 0, 0, false
+	}
+	version := 0
+	if strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") {
+		version = 4
+	} else if strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") {
+		version = 5
+	} else {
+		return 0, 0, false
 	}
 	switch aux.Fn.Name[len(aux.Fn.Name)-1] {
 	case 'A':
-		return 0, true
+		return version, 0, true
 	case 'B':
-		return 1, true
+		return version, 1, true
 	case 'C':
-		return 2, true
+		return version, 2, true
 	case 'D':
-		return 3, true
+		return version, 3, true
 	default:
-		return 0, false
+		return 0, 0, false
 	}
 }
 
@@ -333,9 +355,16 @@ func emitStreamByteCall(b *Block, pos src.XPos, token *streamToken, index, mem *
 		f.Config.Types.UInt64,
 		f.Config.Types.UInt64,
 	}
-	aux := StaticAuxCall(f.fe.Syslook(streamByteRuntimeName(token.decoder)), f.ABIDefault.ABIAnalyzeTypes(argTypes, []*types.Type{f.Config.Types.UInt8}))
+	if token.version == 5 {
+		argTypes = append(argTypes, f.Config.Types.UInt64)
+	}
+	aux := StaticAuxCall(f.fe.Syslook(streamByteRuntimeName(token.version, token.decoder)), f.ABIDefault.ABIAnalyzeTypes(argTypes, []*types.Type{f.Config.Types.UInt8}))
 	call := b.NewValue0A(pos, OpStaticLECall, aux.LateExpansionResultType(), aux)
-	call.AddArgs(token.ciphertext, token.length, index, token.keys[0], token.keys[1], token.keys[2], token.keys[3], mem)
+	call.AddArgs(token.ciphertext, token.length, index, token.keys[0], token.keys[1], token.keys[2], token.keys[3])
+	if token.version == 5 {
+		call.AddArg(token.lease)
+	}
+	call.AddArg(mem)
 	off := f.Config.ctxt.Arch.FixedFrameSize
 	for _, typ := range argTypes {
 		off = types.RoundUp(off, typ.Alignment()) + typ.Size()
@@ -346,15 +375,19 @@ func emitStreamByteCall(b *Block, pos src.XPos, token *streamToken, index, mem *
 	return b.NewValue1I(pos, OpSelectN, f.Config.Types.UInt8, 0, call)
 }
 
-func streamByteRuntimeName(decoder uint8) string {
+func streamByteRuntimeName(version int, decoder uint8) string {
+	prefix := "obfStringByteV4"
+	if version == 5 {
+		prefix = "obfStringByteV5"
+	}
 	switch decoder & 3 {
 	case 0:
-		return "obfStringByteV4A"
+		return prefix + "A"
 	case 1:
-		return "obfStringByteV4B"
+		return prefix + "B"
 	case 2:
-		return "obfStringByteV4C"
+		return prefix + "C"
 	default:
-		return "obfStringByteV4D"
+		return prefix + "D"
 	}
 }

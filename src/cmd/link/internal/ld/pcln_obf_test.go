@@ -74,6 +74,19 @@ func TestObfRuntimeGuardV2SealWords(t *testing.T) {
 	}
 }
 
+func TestObfRuntimeGuardV3SealWords(t *testing.T) {
+	const seal = uint64(0xfedcba9876543210)
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		first, second := obfRuntimeGuardV3SealWords(order, seal)
+		var encoded [8]byte
+		order.PutUint32(encoded[:4], first)
+		order.PutUint32(encoded[4:], second)
+		if got := order.Uint64(encoded[:]); got != seal {
+			t.Fatalf("%T v3 seal serialization = %#x; want %#x", order, got, seal)
+		}
+	}
+}
+
 func TestObfuscatedPclnFileName(t *testing.T) {
 	first := obfuscatedPclnFileName("C:/project/internal/auth/service.go", 0x123456789abcdef0)
 	if len(first) != len("obf.src.")+32 || first[:len("obf.src.")] != "obf.src." {

@@ -83,6 +83,29 @@ func ObfStringDataV4ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64) [
 	return result
 }
 
+// ObfStringDataV5ForTest returns individual lease-bound String v5 byte
+// decodes. Production lowering keeps the bytes separate and never joins them
+// into a plaintext string.
+func ObfStringDataV5ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64, lease uint64) []byte {
+	if len(ciphertext) == 0 {
+		return nil
+	}
+	result := make([]byte, len(ciphertext))
+	for i := range result {
+		switch decoder & 3 {
+		case 0:
+			result[i] = obfStringByteV5A(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease)
+		case 1:
+			result[i] = obfStringByteV5B(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease)
+		case 2:
+			result[i] = obfStringByteV5C(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease)
+		default:
+			result[i] = obfStringByteV5D(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease)
+		}
+	}
+	return result
+}
+
 // ObfRuntimeGuardSealForTest exposes the deterministic guard seal calculation.
 func ObfRuntimeGuardSealForTest(tag uint64, entryKey, magic uint32) uint64 {
 	return obfRuntimeGuardSealV1(tag, entryKey, magic)
@@ -103,6 +126,17 @@ func ObfRuntimeGuardV2SealForTest(tag uint64, entryKey, magic uint32, bootstrap 
 // production fatal path or changing the package-global bootstrap cache.
 func ObfRuntimeGuardV2ValidForTest(tag, seal, expectedBootstrap uint64, entryKey, magic, headerMagic uint32, bootstrap uint64) bool {
 	return obfRuntimeGuardValidV2(tag, seal, expectedBootstrap, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic), bootstrap)
+}
+
+// ObfRuntimeGuardV3SealForTest exposes the v3 function seal calculation.
+func ObfRuntimeGuardV3SealForTest(tag uint64, entryKey, magic uint32, bootstrap, imageLo, imageHi, platform uint64) uint64 {
+	return obfRuntimeGuardSealV3(tag, entryKey, magic, bootstrap, imageLo, imageHi, platform)
+}
+
+// ObfRuntimeGuardV3ValidForTest checks v3 guard inputs without entering the
+// production fatal path or changing the package-global state.
+func ObfRuntimeGuardV3ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform uint64, entryKey, magic, headerMagic uint32, patchedLo, patchedHi, patchedBootstrap, patchedPlatform uint64) bool {
+	return obfRuntimeGuardValidV3(tag, seal, bootstrap, imageLo, imageHi, platform, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic), patchedLo, patchedHi, patchedBootstrap, patchedPlatform)
 }
 
 var Fadd64 = fadd64

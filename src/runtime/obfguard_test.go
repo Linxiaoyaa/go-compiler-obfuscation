@@ -54,3 +54,28 @@ func TestObfRuntimeGuardV2(t *testing.T) {
 		t.Fatal("modified pclntab header magic was accepted")
 	}
 }
+
+func TestObfRuntimeGuardV3(t *testing.T) {
+	const (
+		tag       = uint64(0x2d6f4c1a9b375e04)
+		bootstrap = uint64(0x7f4a7c159e3779b9)
+		imageLo   = uint64(0x0123456789abcdef)
+		imageHi   = uint64(0xfedcba9876543210)
+		platform  = uint64(0x0f1e2d3c4b5a6978)
+		entryKey  = uint32(0x13579bdf)
+		magic     = uint32(0x2468ace1)
+	)
+	seal := runtime.ObfRuntimeGuardV3SealForTest(tag, entryKey, magic, bootstrap, imageLo, imageHi, platform)
+	if !runtime.ObfRuntimeGuardV3ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform) {
+		t.Fatal("valid runtime guard v3 input was rejected")
+	}
+	if runtime.ObfRuntimeGuardV3ValidForTest(tag, seal^1, bootstrap, imageLo, imageHi, platform, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform) {
+		t.Fatal("modified runtime guard v3 seal was accepted")
+	}
+	if runtime.ObfRuntimeGuardV3ValidForTest(tag, seal, bootstrap, imageLo^1, imageHi, platform, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform) {
+		t.Fatal("modified image lane was accepted")
+	}
+	if runtime.ObfRuntimeGuardV3ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform^1, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform) {
+		t.Fatal("modified platform binding was accepted")
+	}
+}

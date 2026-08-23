@@ -7,6 +7,7 @@ package runtime
 import (
 	"internal/abi"
 	"internal/runtime/atomic"
+	"math/bits"
 )
 
 // obfRuntimeGuardV1 checks the linker-populated metadata that protected
@@ -87,6 +88,82 @@ func obfRuntimeGuardValidV2(tag, seal, expectedBootstrap uint64, entryKey uint32
 func obfRuntimeGuardSealV2(tag uint64, entryKey, magic uint32, bootstrap uint64) uint64 {
 	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap
 	x ^= 0x9e3779b97f4a7c15
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+// obfRuntimeGuardV3State records the first image binding that passed the v3
+// gate. Unlike the v2 cache, the state is installed with CAS and every entry
+// rechecks the patched image lanes, so a later metadata edit cannot turn the
+// cache into an unconditional bypass.
+var obfRuntimeGuardV3State atomic.Uint64
+
+//go:noinline
+func obfRuntimeGuardV3(tag, seal, bootstrap, imageLo, imageHi, platform uint64) {
+	hdr := firstmoduledata.pcHeader
+	if hdr == nil || !obfRuntimeGuardV3ModuleReady(hdr) ||
+		!obfRuntimeGuardValidV3(tag, seal, bootstrap, imageLo, imageHi, platform,
+			obfEntryOffKey, obfPclnMagic, hdr.magic,
+			obfRuntimeGuardV3Seal[0], obfRuntimeGuardV3Seal[1],
+			obfRuntimeGuardV3Bootstrap, obfRuntimeGuardV3Platform) {
+		throw("protected runtime integrity check failed")
+	}
+	stamp := obfRuntimeGuardV3Stamp(bootstrap, imageLo, imageHi, platform)
+	state := obfRuntimeGuardV3State.Load()
+	if state == 0 {
+		if !obfRuntimeGuardV3State.CompareAndSwap(0, stamp) && obfRuntimeGuardV3State.Load() != stamp {
+			throw("protected runtime integrity check failed")
+		}
+	} else if state != stamp {
+		throw("protected runtime integrity check failed")
+	}
+	// Re-read all image fields after publishing the state. This gives the fast
+	// path the same fail-closed behavior as the cold path under concurrent edits.
+	if obfRuntimeGuardV3State.Load() != stamp ||
+		obfRuntimeGuardV3Seal[0] != imageLo || obfRuntimeGuardV3Seal[1] != imageHi ||
+		obfRuntimeGuardV3Bootstrap != bootstrap || obfRuntimeGuardV3Platform != platform {
+		throw("protected runtime integrity check failed")
+	}
+}
+
+func obfRuntimeGuardV3ModuleReady(hdr *pcHeader) bool {
+	return hdr.nfunc > 0 && firstmoduledata.text != 0 && firstmoduledata.etext > firstmoduledata.text &&
+		firstmoduledata.maxpc > firstmoduledata.minpc && firstmoduledata.minpc >= firstmoduledata.text &&
+		firstmoduledata.maxpc <= firstmoduledata.etext
+}
+
+func obfRuntimeGuardV3Stamp(bootstrap, imageLo, imageHi, platform uint64) uint64 {
+	x := bootstrap ^ imageLo ^ bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31)
+	x ^= 0x13198a2e03707344
+	x ^= x >> 29
+	x *= 0x9e3779b97f4a7c15
+	x ^= x >> 32
+	if x == 0 {
+		return 0x6a09e667f3bcc909
+	}
+	return x
+}
+
+func obfRuntimeGuardValidV3(tag, seal, bootstrap, imageLo, imageHi, platform uint64, entryKey uint32, magic, headerMagic abi.PCLnTabMagic, patchedLo, patchedHi, patchedBootstrap, patchedPlatform uint64) bool {
+	if bootstrap == 0 || bootstrap == obfRuntimeGuardV3Unpatched ||
+		imageLo == 0 || imageHi == 0 || platform == 0 ||
+		patchedLo != imageLo || patchedHi != imageHi ||
+		patchedBootstrap != bootstrap || patchedPlatform != platform {
+		return false
+	}
+	if entryKey == obfEntryOffDisabled || magic == obfPclnMagicUnpatched || headerMagic != magic {
+		return false
+	}
+	return obfRuntimeGuardSealV3(tag, entryKey, uint32(magic), bootstrap, imageLo, imageHi, platform) == seal
+}
+
+func obfRuntimeGuardSealV3(tag uint64, entryKey, magic uint32, bootstrap, imageLo, imageHi, platform uint64) uint64 {
+	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap ^ imageLo
+	x ^= bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31)
+	x ^= 0x243f6a8885a308d3
 	x ^= x >> 30
 	x *= 0xbf58476d1ce4e5b9
 	x ^= x >> 27

@@ -93,6 +93,8 @@ func protectionFlag(verb string) ir.ProtectionFlag {
 		return ir.ProtectEphemeral
 	case "go:stream":
 		return ir.ProtectStream
+	case "go:streamv5":
+		return ir.ProtectStreamV5
 	}
 	return 0
 }

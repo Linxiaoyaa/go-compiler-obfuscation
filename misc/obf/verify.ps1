@@ -20,7 +20,9 @@ param(
     [switch]$RequireTooling,
     [switch]$RequireCleanCompiler,
     [switch]$RequireRuntimeChecks,
+    [switch]$RequireRuntimeGuardV3,
     [switch]$RequireStringV4,
+    [switch]$RequireStringV5,
     [string[]]$RequireFunction = @(),
     [int]$MinReportFunctions = -1,
     [int]$MinV4Aliases = -1,
@@ -504,30 +506,57 @@ $hashedFunctions = @($protectedFunctions | Where-Object {
 })
 
 $runtimeCheckMode = if ($null -eq $protection) { "" } else { [string]$protection.runtimeChecks }
-if ($RequireRuntimeChecks) {
-    Add-Check -Name "runtime-checks.profile" -Status $(if ($runtimeCheckMode -eq "entry-v2") { "pass" } else { "fail" }) -Expected "entry-v2" -Actual $runtimeCheckMode
+if ($RequireRuntimeChecks -or $RequireRuntimeGuardV3) {
+    $runtimeVersion = if ($runtimeCheckMode -eq "entry-v3") { "v3" } elseif ($runtimeCheckMode -eq "entry-v2") { "v2" } else { "" }
+    $runtimeModeExpected = if ($RequireRuntimeGuardV3) { "entry-v3" } else { "entry-v3 or entry-v2" }
+    $runtimeModeOK = if ($RequireRuntimeGuardV3) { $runtimeVersion -eq "v3" } else { [bool]$runtimeVersion }
+    Add-Check -Name "runtime-checks.profile" -Status $(if ($runtimeModeOK) { "pass" } else { "fail" }) -Expected $runtimeModeExpected -Actual $runtimeCheckMode
     $guardedFunctions = @($protectedFunctions | Where-Object {
-        ([string]$_.applied) -match '(^|\s)runtime=entry-v2(\s|$)'
+        ([string]$_.applied) -match ("(^|\s)runtime=entry-" + $runtimeVersion + "(\s|$)")
     })
     $runtimeCoverageOK = $protectedFunctions.Count -gt 0 -and $guardedFunctions.Count -eq $protectedFunctions.Count
     Add-Check -Name "runtime-checks.coverage" -Status $(if ($runtimeCoverageOK) { "pass" } else { "fail" }) -Expected "all protected functions" -Actual "$($guardedFunctions.Count)/$($protectedFunctions.Count)"
 
-    $guardV2Marker = if ($null -eq $markers) { $null } else { $markers.runtimeGuardV2 }
-    $guardV2Enabled = $null -ne $guardV2Marker -and [bool]$guardV2Marker.enabled
-    $guardV2Hex = if ($guardV2Enabled) { [string]$guardV2Marker.littleEndian } else { "" }
-    $guardV2Bytes = Convert-HexToBytes -Value $guardV2Hex
-    $guardV2FormatOK = $guardV2Enabled -and $null -ne $guardV2Bytes -and $guardV2Bytes.Length -eq 8
-    Add-Check -Name "runtime-checks.bootstrap-profile" -Status $(if ($guardV2FormatOK) { "pass" } else { "fail" }) -Expected "enabled 64-bit bootstrap seal" -Actual $(if ($guardV2Enabled) { $guardV2Hex } else { "missing" })
-    if ($guardV2FormatOK) {
-        $guardV2Count = Find-ByteSequenceCount -Data $artifactBytes -Needle $guardV2Bytes
-        $recordedGuardV2Count = -1
-        try {
-            $recordedGuardV2Count = [int]$guardV2Marker.count
-        } catch {
-            $recordedGuardV2Count = -1
+    if ($runtimeVersion -eq "v3") {
+        $guardV3Marker = if ($null -eq $markers) { $null } else { $markers.runtimeGuardV3 }
+        $guardV3Enabled = $null -ne $guardV3Marker -and [bool]$guardV3Marker.enabled
+        Add-Check -Name "runtime-checks.v3.profile" -Status $(if ($guardV3Enabled) { "pass" } else { "fail" }) -Expected "enabled image and platform bindings" -Actual $(if ($guardV3Enabled) { [string]$guardV3Marker.target } else { "missing" })
+        foreach ($markerName in @("sealLo", "sealHi", "bootstrap", "platform")) {
+            $wordMarker = if ($guardV3Enabled) { $guardV3Marker.$markerName } else { $null }
+            $wordHex = if ($null -ne $wordMarker) { [string]$wordMarker.littleEndian } else { "" }
+            $wordBytes = Convert-HexToBytes -Value $wordHex
+            $wordFormatOK = $null -ne $wordBytes -and $wordBytes.Length -eq 8
+            Add-Check -Name "runtime-checks.v3.$markerName.profile" -Status $(if ($wordFormatOK) { "pass" } else { "fail" }) -Expected "64-bit marker" -Actual $(if ($wordFormatOK) { $wordHex } else { "missing" })
+            if ($wordFormatOK) {
+                $imageCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $wordBytes
+                $recordedCount = -1
+                try {
+                    $recordedCount = [int]$wordMarker.count
+                } catch {
+                    $recordedCount = -1
+                }
+                $wordOK = $imageCount -gt 0 -and $recordedCount -eq $imageCount
+                Add-Check -Name "runtime-checks.v3.$markerName.marker" -Status $(if ($wordOK) { "pass" } else { "fail" }) -Expected "recorded non-zero count" -Actual "$imageCount/$recordedCount"
+            }
         }
-        $guardV2MarkerOK = $guardV2Count -gt 0 -and $recordedGuardV2Count -eq $guardV2Count
-        Add-Check -Name "runtime-checks.bootstrap-marker" -Status $(if ($guardV2MarkerOK) { "pass" } else { "fail" }) -Expected "recorded non-zero count" -Actual "$guardV2Count/$recordedGuardV2Count"
+    } else {
+        $guardV2Marker = if ($null -eq $markers) { $null } else { $markers.runtimeGuardV2 }
+        $guardV2Enabled = $null -ne $guardV2Marker -and [bool]$guardV2Marker.enabled
+        $guardV2Hex = if ($guardV2Enabled) { [string]$guardV2Marker.littleEndian } else { "" }
+        $guardV2Bytes = Convert-HexToBytes -Value $guardV2Hex
+        $guardV2FormatOK = $guardV2Enabled -and $null -ne $guardV2Bytes -and $guardV2Bytes.Length -eq 8
+        Add-Check -Name "runtime-checks.bootstrap-profile" -Status $(if ($guardV2FormatOK) { "pass" } else { "fail" }) -Expected "enabled 64-bit bootstrap seal" -Actual $(if ($guardV2Enabled) { $guardV2Hex } else { "missing" })
+        if ($guardV2FormatOK) {
+            $guardV2Count = Find-ByteSequenceCount -Data $artifactBytes -Needle $guardV2Bytes
+            $recordedGuardV2Count = -1
+            try {
+                $recordedGuardV2Count = [int]$guardV2Marker.count
+            } catch {
+                $recordedGuardV2Count = -1
+            }
+            $guardV2MarkerOK = $guardV2Count -gt 0 -and $recordedGuardV2Count -eq $guardV2Count
+            Add-Check -Name "runtime-checks.bootstrap-marker" -Status $(if ($guardV2MarkerOK) { "pass" } else { "fail" }) -Expected "recorded non-zero count" -Actual "$guardV2Count/$recordedGuardV2Count"
+        }
     }
 }
 
@@ -538,6 +567,15 @@ if ($RequireStringV4) {
         ([string]$_.applied) -match '(^|\s)encrypt=str-runtime-v4-stream(\s|$)'
     })
     Add-Check -Name "string-v4.coverage" -Status $(if ($streamFunctions.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $streamFunctions.Count
+}
+
+if ($RequireStringV5) {
+    $stringRuntime = if ($null -eq $protection) { "" } else { [string]$protection.stringRuntime }
+    Add-Check -Name "string-v5.profile" -Status $(if ($stringRuntime -match '(^|\+)v5-lease($|\+)') { "pass" } else { "fail" }) -Expected "v5-lease" -Actual $stringRuntime
+    $leaseStreamFunctions = @($protectedFunctions | Where-Object {
+        ([string]$_.applied) -match '(^|\s)encrypt=str-runtime-v5-lease(\s|$)'
+    })
+    Add-Check -Name "string-v5.coverage" -Status $(if ($leaseStreamFunctions.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $leaseStreamFunctions.Count
 }
 
 $nameMode = if ($null -eq $protection) { "" } else { [string]$protection.names }

@@ -1,4 +1,4 @@
-# Go protection compiler v4.0 (String v4 + Runtime Guard v2)
+# Go protection compiler v5.0 (String v5 + Runtime Guard v3)
 
 This compiler fork recognizes function directives that remain valid Go source:
 
@@ -28,6 +28,7 @@ func exportedBridge(a, b uint64) uint64 {
 - `//go:vm`: translates supported pure SSA into a per-function register-threaded VM v3 dispatcher.
 - `//go:ephemeral`: combines with `//go:encrypt` for a short-lived string literal. The function cannot return string values; the compiler proves that decoded storage stays local and inserts a wipe on every normal return. A runtime cleanup remains for the exceptional GC path.
 - `//go:stream`: combines with `//go:encrypt` for String v4. It permits only local `len` and byte-index reads, replaces each read with a bounded single-byte decoder, and rejects calls, stores, comparisons, interfaces, maps, channels, returns, and other string/pointer escapes. It cannot be combined with `//go:ephemeral` or `//go:vm`.
+- `//go:streamv5`: combines with `//go:encrypt` for a lease-bound String v5 byte stream. It has the same strict local `len` and byte-read boundary as v4, but uses separate ciphertext, mask, and lease domains. It cannot be combined with `//go:ephemeral`, `//go:stream`, or `//go:vm`.
 - `//go:noprotect`: explicitly excludes the function and cannot be combined with the other directives.
 
 Protected functions are automatically excluded from inlining. Explicit directives are strict: unsupported functions fail compilation instead of silently losing protection.
@@ -62,6 +63,8 @@ String v3 is selected by `//go:ephemeral` and uses separate derivation and ciphe
 
 String v4 is selected by `//go:stream`. Its emitted string header points only to ciphertext; an SSA pass replaces approved byte loads with one of four bounded byte decoders and changes `len` uses to the known ciphertext length. The decoder validates its index, derives one byte, wipes its short-lived key lanes, and does not allocate or materialize a complete plaintext string. This mode is intentionally narrow: it is for byte-wise comparisons and parsers that can consume secret text incrementally.
 
+String v5 is selected by `//go:streamv5`. It keeps the v4 local-only SSA boundary but derives ciphertext and each byte mask from independent v5 root, literal, mask, and lease domains. The byte decoder combines the lease with a temporary per-byte key, zeros both before return, and never materializes a complete plaintext string. Use it where a caller can consume the value byte by byte and the additional per-read derivation cost is acceptable.
+
 ## VM v3 boundary
 
 VM v3 accepts pure functions with at least one `uint64` argument and one scalar result (`uint64` or `bool`). It preserves multiple plain/conditional blocks, loops, and Phi values by assigning virtual registers on dispatcher edges. Supported operations are arguments, `uint64` constants, copy, add, subtract, multiply, bitwise AND/OR/XOR, left shift by `uint64`, unsigned right shift by `uint64`, negate, complement, equality/inequality, unsigned less-than/less-or-equal, boolean AND/OR/equality/inequality/NOT, and conditional select.
@@ -72,7 +75,7 @@ VM v3 fuses up to eight consecutive pure calculations into seed-dependent super-
 
 VM v4 retains the v3 register dispatcher and adds a bounded number of independently seeded alias checks. `-VMBudget` (or `-d=obfv4budget`) caps estimated dispatcher growth; reports include `aliases=` and `budget=` so the verifier can enforce a minimum without allowing unbounded compile-time expansion.
 
-Protected release builds inject a `runtime=entry-v2` gate at every protected function entry. The linker writes an independent 64-bit bootstrap seal in addition to the entry-offset key and custom `pclntab` magic. The gate records the first valid bootstrap state in an atomic cache, then still checks the patched seal, module header, entry key, magic, and function-local seal at every protected entry. It detects inconsistent or modified linker metadata before protected work begins. The normal build path enables it automatically; `-NoRuntimeChecks` disables it, and diagnostic builds that use `-NoObfuscateEntryOff` or `-NoObfuscateMagic` disable it because those options intentionally remove part of the bound runtime state.
+Protected release builds inject a `runtime=entry-v3` gate at every protected function entry. The linker writes independent 64-bit bootstrap, image-low, image-high, and target-platform words in addition to the entry-offset key and custom `pclntab` magic. The gate validates module bounds and every patched word, records the first valid image binding with an atomic compare-and-swap, then revalidates the image fields at each protected entry. This detects inconsistent or modified linker metadata before protected work begins. The normal build path enables it automatically; `-NoRuntimeChecks` disables it, and diagnostic builds that use `-NoObfuscateEntryOff` or `-NoObfuscateMagic` disable it because those options intentionally remove part of the bound runtime state.
 
 Pointer-bearing registers, signed/narrow integer conversions, multiple returns, memory operations, calls, interfaces, `defer`, `panic/recover`, jump tables, and strings remain outside the VM boundary. String literals are supported by `//go:encrypt` only on the native non-VM path. An explicitly marked function that crosses the VM boundary fails compilation with a diagnostic; it is never silently emitted without the requested VM transform.
 
@@ -88,7 +91,7 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
   -ScanPlaintext @('literal-that-must-not-appear')
 ```
 
-The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, writes the Runtime Guard v2 bootstrap seal, enables entry integrity checks, randomizes function layout, and uses a dedicated V12 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRuntimeChecks` to remove entry gates, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
+The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, writes Runtime Guard v3 bootstrap/image/platform words, enables entry integrity checks, randomizes function layout, and uses a dedicated V13 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRuntimeChecks` to remove entry gates, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
 
 ### Build profiles and independent verification
 
@@ -113,7 +116,7 @@ $build = 'D:\Projection\GoProject\go-compiler\misc\obf\build.ps1'
   -Manifest .\dist\app-protected.manifest.json `
   -CompilerPath 'D:\Projection\GoProject\go-compiler\bin\tool\windows_amd64\compile.exe' `
   -CompilerRoot 'D:\Projection\GoProject\go-compiler' `
-  -RequireCompilerBinary -RequireCompilerSource -RequireRuntimeChecks `
+  -RequireCompilerBinary -RequireCompilerSource -RequireRuntimeGuardV3 `
   -ForbiddenMetadata @('source-root-or-build-marker') `
   -ExpectedAbsent @('literal-that-must-not-appear')
 ```
@@ -138,9 +141,9 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-`verify.ps1` emits one machine-readable JSON result and exits `0` only when every applicable check passes. It independently checks the profile schema, artifact path/size/SHA-256, optional externally supplied artifact/compiler/seed fingerprints, required function coverage, hidden or retained protected names, hashed pclntab source names, the recorded pclntab magic, the encoded entry-key marker, and any `-ForbiddenText`/`-ExpectedAbsent` values. `-RequireStringV4` additionally requires the v4 profile marker and at least one report entry with `encrypt=str-runtime-v4-stream`. Function-name checks use the compiler's `name=hash-v1` report marker, so exported APIs that intentionally retain stable names are recorded as compatibility skips. The profile stores only hashes for build-time plaintext scans, so pass those values again when the verifier must rescan them; without them the result marks that check as `skip` instead of claiming an independent scan. A mismatched artifact or profile exits `1`; a missing/invalid profile or artifact exits `2`.
+`verify.ps1` emits one machine-readable JSON result and exits `0` only when every applicable check passes. It independently checks the profile schema, artifact path/size/SHA-256, optional externally supplied artifact/compiler/seed fingerprints, required function coverage, hidden or retained protected names, hashed pclntab source names, the recorded pclntab magic, the encoded entry-key marker, and any `-ForbiddenText`/`-ExpectedAbsent` values. `-RequireRuntimeGuardV3` requires `entry-v3` coverage plus all four image-binding marker records; `-RequireRuntimeChecks` remains compatible with legacy v2 profiles. `-RequireStringV4` and `-RequireStringV5` require their respective profile markers and at least one matching protected function. Function-name checks use the compiler's `name=hash-v1` report marker, so exported APIs that intentionally retain stable names are recorded as compatibility skips. The profile stores only hashes for build-time plaintext scans, so pass those values again when the verifier must rescan them; without them the result marks that check as `skip` instead of claiming an independent scan. A mismatched artifact or profile exits `1`; a missing/invalid profile or artifact exits `2`.
 
-`test-integrity.ps1` exercises the release verifier against an untouched copied record plus eight intentional changes: artifact bytes, a self-consistent residual metadata insertion, manifest artifact hash, compiler binary hash, compiler source digest, seed fingerprint, the declared runtime-check mode, and the Runtime Guard v2 bootstrap marker. It expects each modified case to fail on its named verifier check, then exits `0` only when the complete negative suite behaves as expected.
+`test-integrity.ps1` exercises the release verifier against an untouched copied record plus nine intentional changes: artifact bytes, a self-consistent residual metadata insertion, manifest artifact hash, compiler binary hash, compiler source digest, seed fingerprint, disabled runtime checks, a self-consistent v3-to-v2 runtime downgrade, and the Runtime Guard v3 image-binding marker. It expects each modified case to fail on its named verifier check, then exits `0` only when the complete negative suite behaves as expected.
 
 ```powershell
 $profile = Get-Content .\dist\app-protected.profile.json -Raw | ConvertFrom-Json
@@ -166,10 +169,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 ### Cross-platform and negative coverage
 
-`test-matrix.ps1` runs the protected fixture for `windows/amd64`, `linux/amd64`, and `linux/arm64` (override with `-Target`). Before the positive matrix it compiles `testdata/v4negative` with `//go:stream` applied to a string comparison and requires the compiler to reject the `StaticLECall` escape diagnostic. A zero exit, a missing diagnostic, or a published artifact fails the matrix. The negative check uses a fixed seed and an isolated cache so it is reproducible and does not affect release artifacts.
+`test-matrix.ps1` runs the protected fixture for `windows/amd64`, `linux/amd64`, `linux/arm64`, `linux/riscv64`, `darwin/amd64`, and `darwin/arm64` (override with `-Target`). It builds and verifies every tuple, and executes the Windows AMD64 artifact on a Windows host. Before the positive matrix it compiles both `testdata/v4negative` and `testdata/v5negative`, with their stream directives applied to a string comparison, and requires the compiler to reject the `StaticLECall` escape diagnostic. A zero exit, a missing diagnostic, or a published artifact fails the matrix. The negative checks use fixed seeds and isolated caches so they are reproducible and do not affect release artifacts.
 
 ```powershell
 & 'D:\Projection\GoProject\go-compiler\misc\obf\test-matrix.ps1' `
-  -OutDir .\work\v4-cross-platform
+  -OutDir .\work\v5-cross-platform
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```

@@ -360,6 +360,28 @@ function Get-ObfRuntimeGuardV2Seal {
     return $seal
 }
 
+function Get-ObfRuntimeGuardV3Word {
+    param(
+        [string]$Domain,
+        [string]$Value,
+        [string]$Target
+    )
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $input = $Domain + [char]0 + $Value + [char]0 + $Target
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($input))
+    } finally {
+        $sha.Dispose()
+    }
+    $word = [uint64][BitConverter]::ToUInt64($digest, 0)
+    $unpatched = [Convert]::ToUInt64("a5a5a5a5a5a5a5a5", 16)
+    if ($word -eq 0 -or $word -eq $unpatched) {
+        $word = [Convert]::ToUInt64("6a09e667f3bcc909", 16)
+    }
+    return $word
+}
+
 function Get-ObfLayoutSeed {
     param([string]$Value)
 
@@ -436,7 +458,7 @@ if ($Seed -notmatch '^[A-Za-z0-9._-]+$') {
 $seedFingerprint = Get-Sha256Text -Value ("go-obf-seed-v1/" + $Seed)
 
 if (-not $Cache) {
-    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v12"
+    $Cache = Join-Path $env:LOCALAPPDATA "go-build-obf-v13"
 }
 $Cache = Resolve-UserPath -Value $Cache
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -511,8 +533,8 @@ try {
     # The guard binds compiler-generated seals to both linker-patched runtime
     # fields. Diagnostic builds that retain either raw field intentionally do
     # not receive a guard unless they restore the normal protected layout.
-    $runtimeChecksEnabled = -not $NoRuntimeChecks -and -not $NoObfuscateEntryOff -and -not $NoObfuscateMagic
-    $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=1" } else { "" }
+        $runtimeChecksEnabled = -not $NoRuntimeChecks -and -not $NoObfuscateEntryOff -and -not $NoObfuscateMagic
+        $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=3" } else { "" }
     if ($VMBudget -lt 256) {
         throw "VMBudget must be at least 256"
     }
@@ -521,7 +543,15 @@ try {
 
     $entryKey = $null
     $magic = $null
-    $bootstrapSeal = $null
+        $runtimeGuardTargetValues = @(& $go env GOOS GOARCH 2>$null)
+        if ($runtimeGuardTargetValues.Count -lt 2) {
+            throw "could not resolve target tuple for Runtime Guard v3"
+        }
+        $runtimeGuardTarget = (([string]$runtimeGuardTargetValues[0]).Trim() + "/" + ([string]$runtimeGuardTargetValues[1]).Trim())
+        $runtimeGuardV3SealLo = $null
+        $runtimeGuardV3SealHi = $null
+        $runtimeGuardV3Bootstrap = $null
+        $runtimeGuardV3Platform = $null
     $layoutSeed = $null
     $fileNameKey = $null
     $ldflags = @()
@@ -540,9 +570,18 @@ try {
         $magic = Get-ObfPclnMagic -Value $Seed
         $ldflags += @("-obfmagic", "-obfmagicvalue=$magic")
     }
-    if ($runtimeChecksEnabled) {
-        $bootstrapSeal = Get-ObfRuntimeGuardV2Seal -Value $Seed
-        $ldflags += @("-obfguardv2", "-obfguardv2seal=$bootstrapSeal")
+        if ($runtimeChecksEnabled) {
+            $runtimeGuardV3SealLo = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-lo" -Value $Seed -Target $runtimeGuardTarget
+            $runtimeGuardV3SealHi = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-hi" -Value $Seed -Target $runtimeGuardTarget
+            $runtimeGuardV3Bootstrap = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/bootstrap" -Value $Seed -Target $runtimeGuardTarget
+            $runtimeGuardV3Platform = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/platform" -Value "" -Target $runtimeGuardTarget
+            $ldflags += @(
+                "-obfguardv3",
+                "-obfguardv3seallo=$runtimeGuardV3SealLo",
+                "-obfguardv3sealhi=$runtimeGuardV3SealHi",
+                "-obfguardv3bootstrap=$runtimeGuardV3Bootstrap",
+                "-obfguardv3platform=$runtimeGuardV3Platform"
+            )
     }
     if (-not $NoRandomizeLayout) {
         $layoutSeed = Get-ObfLayoutSeed -Value $Seed
@@ -568,7 +607,7 @@ try {
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
     Write-Host "pclntab:  $(if ($NoObfuscateMagic) { 'standard-magic' } else { 'seed-magic' })"
-    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v2' } else { 'disabled' })"
+    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v3' } else { 'disabled' })"
     Write-Host "layout:   $(if ($NoRandomizeLayout) { 'stable' } else { 'seed-randomized' })"
     Write-Host "files:    $(if ($NoObfuscateFileNames) { 'original' } else { 'hashed-pclntab' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -683,12 +722,24 @@ try {
             $entryKeyBytesForProfile = Convert-BytesToHex -Value $entryKeyBytes
             $entryKeyCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $entryKeyBytes
         }
-        $bootstrapSealBytesForProfile = $null
-        $bootstrapSealCount = 0
+        $runtimeGuardV3Marker = $null
         if ($runtimeChecksEnabled) {
-            $bootstrapSealBytes = Get-LittleEndianBytes -Value ([uint64]$bootstrapSeal) -Width 8
-            $bootstrapSealBytesForProfile = Convert-BytesToHex -Value $bootstrapSealBytes
-            $bootstrapSealCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $bootstrapSealBytes
+            $runtimeGuardV3Words = [ordered]@{
+                sealLo = [uint64]$runtimeGuardV3SealLo
+                sealHi = [uint64]$runtimeGuardV3SealHi
+                bootstrap = [uint64]$runtimeGuardV3Bootstrap
+                platform = [uint64]$runtimeGuardV3Platform
+            }
+            $runtimeGuardV3Marker = [ordered]@{ enabled = $true; target = $runtimeGuardTarget }
+            foreach ($name in $runtimeGuardV3Words.Keys) {
+                $wordBytes = Get-LittleEndianBytes -Value $runtimeGuardV3Words[$name] -Width 8
+                $runtimeGuardV3Marker[$name] = [ordered]@{
+                    littleEndian = Convert-BytesToHex -Value $wordBytes
+                    count = Find-ByteSequenceCount -Data $artifactBytes -Needle $wordBytes
+                }
+            }
+        } else {
+            $runtimeGuardV3Marker = [ordered]@{ enabled = $false; target = "" }
         }
         $driverVersion = ""
         try {
@@ -780,9 +831,9 @@ try {
                 pclntabMagic = $magicKind
                 functionLayout = if ($NoRandomizeLayout) { "stable" } else { "seed-randomized" }
                 fileNames = if ($NoObfuscateFileNames) { "original" } else { "hashed-pclntab" }
-                stringRuntime = "v2+v3-ephemeral+v4-stream"
+                stringRuntime = "v2+v3-ephemeral+v4-stream+v5-lease"
                 vm = "v4-budgeted"
-                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v2" } else { "disabled" }
+                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v3" } else { "disabled" }
             }
             artifact = [ordered]@{
                 path = $outPath
@@ -818,11 +869,7 @@ try {
                     littleEndian = $entryKeyBytesForProfile
                     count = $entryKeyCount
                 }
-                runtimeGuardV2 = [ordered]@{
-                    enabled = $runtimeChecksEnabled
-                    littleEndian = $bootstrapSealBytesForProfile
-                    count = $bootstrapSealCount
-                }
+                runtimeGuardV3 = $runtimeGuardV3Marker
             }
         }
         $json = $profile | ConvertTo-Json -Depth 12
@@ -862,7 +909,7 @@ try {
                     CGO_ENABLED = $targetCgo
                 }
                 protection = [ordered]@{
-                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v2" } else { "disabled" }
+                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v3" } else { "disabled" }
                 }
             }
             $temporaryManifest = "$manifestPath.tmp.$PID"

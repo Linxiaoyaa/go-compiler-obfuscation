@@ -25,6 +25,7 @@ import (
 type ObfuscatedStringKey struct {
 	Lanes   [4]uint64
 	Decoder uint8
+	Lease   uint64
 }
 
 const protectedFunctionFlags = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize
@@ -99,10 +100,22 @@ func ObfuscatedStringSymV4(pos src.XPos, functionName, seed, text string) (*obj.
 	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v4")
 }
 
+// ObfuscatedStringSymV5 emits ciphertext for a lease-bound stream-only
+// literal. Its byte mask and the lease word use a separate domain from every
+// earlier string mode, so v5 cannot reuse a v4 token or decoder schedule.
+func ObfuscatedStringSymV5(pos src.XPos, functionName, seed, text string) (*obj.LSym, ObfuscatedStringKey) {
+	key := obfuscatedStringKeyV5(functionName, seed, text)
+	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v5")
+}
+
 func obfuscatedStringSym(pos src.XPos, text string, key ObfuscatedStringKey, symbolDomain string) (*obj.LSym, ObfuscatedStringKey) {
 	ciphertext := make([]byte, len(text))
 	for i := range ciphertext {
-		ciphertext[i] = text[i] ^ obfuscatedStringMaskV2(key.Lanes, key.Decoder, i)
+		mask := obfuscatedStringMaskV2(key.Lanes, key.Decoder, i)
+		if key.Lease != 0 {
+			mask = obfuscatedStringMaskV5(key.Lanes, key.Lease, key.Decoder, i)
+		}
+		ciphertext[i] = text[i] ^ mask
 	}
 
 	// Keep the symbol content-addressable, but derive its name from the
@@ -147,6 +160,27 @@ func obfuscatedStringKeyV4(functionName, seed, text string) ObfuscatedStringKey 
 			binary.LittleEndian.Uint64(mask[off:off+8])
 	}
 	key.Decoder = (literal[7] ^ literal[23]) & 3
+	return key
+}
+
+func obfuscatedStringKeyV5(functionName, seed, text string) ObfuscatedStringKey {
+	root := hashParts([]byte("go-obf-string-v5/root"), []byte(seed))
+	function := hashParts(root[:], []byte("function"), []byte(functionName))
+	literal := hashParts(function[:], []byte("lease-stream-literal"), []byte(text))
+	mask := hashParts(literal[:], []byte("lease-stream-mask"))
+	lease := hashParts(mask[:], []byte("lease"))
+
+	var key ObfuscatedStringKey
+	for i := range key.Lanes {
+		off := i * 8
+		key.Lanes[i] = binary.LittleEndian.Uint64(literal[off:off+8]) ^
+			binary.LittleEndian.Uint64(mask[off:off+8])
+	}
+	key.Lease = binary.LittleEndian.Uint64(lease[:8]) ^ binary.LittleEndian.Uint64(mask[24:32])
+	if key.Lease == 0 {
+		key.Lease = 0x6a09e667f3bcc909
+	}
+	key.Decoder = (literal[5] ^ literal[29] ^ lease[13]) & 3
 	return key
 }
 
@@ -209,6 +243,17 @@ func obfuscatedStringMaskV2(lanes [4]uint64, decoder uint8, index int) byte {
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
 	return byte(x >> uint((i&7)*8))
+}
+
+func obfuscatedStringMaskV5(lanes [4]uint64, lease uint64, decoder uint8, index int) byte {
+	i := uint64(index)
+	x := lease ^ lanes[(uint64(decoder)+i)&3]
+	x += i*0xd6e8feb86659fd93 + 0xa4093822299f31d0
+	x ^= rotate64(lanes[(uint64(decoder)+i+1)&3]^lease, uint((i+uint64(decoder)*11)&63))
+	x ^= x >> 29
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return obfuscatedStringMaskV2(lanes, decoder, index) ^ byte(x>>uint((i&7)*8))
 }
 
 func rotate64(x uint64, n uint) uint64 {

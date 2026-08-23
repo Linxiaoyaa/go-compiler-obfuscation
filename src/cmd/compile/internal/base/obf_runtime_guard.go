@@ -7,12 +7,15 @@ package base
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"internal/buildcfg"
+	"math/bits"
 )
 
 const (
 	obfEntryOffDisabled   uint32 = 0xa5a5a5a5
 	obfPclnMagicUnpatched uint32 = 0xa5a5a5a5
 	obfRuntimeGuardV2None uint64 = 0xa5a5a5a5a5a5a5a5
+	obfRuntimeGuardV3None uint64 = 0xa5a5a5a5a5a5a5a5
 )
 
 // ObfRuntimeGuardV1Values returns the function-local tag and seal consumed by
@@ -49,6 +52,39 @@ func ObfRuntimeGuardV2BootstrapSeal(seed string) uint64 {
 	return seal
 }
 
+// ObfRuntimeGuardV3Values derives the v3 function and image bindings for the
+// compiler's target tuple. The target is included in every independent domain
+// so a cached object compiled for one platform cannot satisfy another image.
+func ObfRuntimeGuardV3Values(seed, function string) (tag, seal, bootstrap, imageLo, imageHi, platform uint64) {
+	return ObfRuntimeGuardV3ValuesForTarget(seed, function, buildcfg.GOOS+"/"+buildcfg.GOARCH)
+}
+
+// ObfRuntimeGuardV3ValuesForTarget is split out for deterministic unit tests
+// and for tools that need to preview a cross-compiled guard record.
+func ObfRuntimeGuardV3ValuesForTarget(seed, function, target string) (tag, seal, bootstrap, imageLo, imageHi, platform uint64) {
+	tagDigest := obfRuntimeGuardV3Digest("go-obf-runtime-guard-v3/function", seed, target, function)
+	tag = binary.LittleEndian.Uint64(tagDigest[:8])
+	bootstrap = obfRuntimeGuardV3Word("go-obf-runtime-guard-v3/bootstrap", seed, target)
+	imageLo = obfRuntimeGuardV3Word("go-obf-runtime-guard-v3/image-lo", seed, target)
+	imageHi = obfRuntimeGuardV3Word("go-obf-runtime-guard-v3/image-hi", seed, target)
+	platform = obfRuntimeGuardV3Word("go-obf-runtime-guard-v3/platform", "", target)
+	seal = obfRuntimeGuardSealV3(tag, obfRuntimeEntryKey(seed), obfRuntimePclnMagic(seed), bootstrap, imageLo, imageHi, platform)
+	return
+}
+
+func obfRuntimeGuardV3Digest(domain, seed, target, function string) [32]byte {
+	return sha256.Sum256([]byte(domain + "\x00" + seed + "\x00" + target + "\x00" + function))
+}
+
+func obfRuntimeGuardV3Word(domain, seed, target string) uint64 {
+	digest := sha256.Sum256([]byte(domain + "\x00" + seed + "\x00" + target))
+	word := binary.LittleEndian.Uint64(digest[:8])
+	if word == 0 || word == obfRuntimeGuardV3None {
+		return 0x6a09e667f3bcc909
+	}
+	return word
+}
+
 func obfRuntimeEntryKey(seed string) uint32 {
 	digest := sha256.Sum256([]byte(seed))
 	key := binary.LittleEndian.Uint32(digest[:4]) | 1
@@ -81,6 +117,17 @@ func obfRuntimeGuardSealV1(tag uint64, entryKey, magic uint32) uint64 {
 func obfRuntimeGuardSealV2(tag uint64, entryKey, magic uint32, bootstrap uint64) uint64 {
 	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap
 	x ^= 0x9e3779b97f4a7c15
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+func obfRuntimeGuardSealV3(tag uint64, entryKey, magic uint32, bootstrap, imageLo, imageHi, platform uint64) uint64 {
+	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap ^ imageLo
+	x ^= bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31)
+	x ^= 0x243f6a8885a308d3
 	x ^= x >> 30
 	x *= 0xbf58476d1ce4e5b9
 	x ^= x >> 27

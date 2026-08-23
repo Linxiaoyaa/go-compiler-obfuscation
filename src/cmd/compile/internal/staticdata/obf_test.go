@@ -100,6 +100,25 @@ func TestObfuscatedStringKeyV4SeparateDomain(t *testing.T) {
 	}
 }
 
+func TestObfuscatedStringKeyV5SeparateDomain(t *testing.T) {
+	v2 := obfuscatedStringKeyV2("pkg.fn", "seed-a", "literal-a")
+	v3 := obfuscatedStringKeyV3("pkg.fn", "seed-a", "literal-a")
+	v4 := obfuscatedStringKeyV4("pkg.fn", "seed-a", "literal-a")
+	v5 := obfuscatedStringKeyV5("pkg.fn", "seed-a", "literal-a")
+	if v5 == v2 || v5 == v3 || v5 == v4 {
+		t.Fatal("String v5 reused an earlier string key domain")
+	}
+	if v5.Lease == 0 {
+		t.Fatal("String v5 lease is zero")
+	}
+	if again := obfuscatedStringKeyV5("pkg.fn", "seed-a", "literal-a"); again != v5 {
+		t.Fatalf("String v5 is not deterministic: %#v != %#v", again, v5)
+	}
+	if other := obfuscatedStringKeyV5("pkg.fn", "seed-a", "literal-b"); other.Lease == v5.Lease {
+		t.Fatal("String v5 literal did not change the lease")
+	}
+}
+
 func BenchmarkObfuscatedStringKeyV2(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		obfuscatedStringKeyV2Sink = obfuscatedStringKeyV2(
