@@ -5,6 +5,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Out,
 
+    [ValidateSet("default", "exe", "pie", "c-shared")]
+    [string]$BuildMode = "default",
+
     [string]$Pattern = "",
     [string]$Seed = "",
     [string]$SeedFile = "",
@@ -468,12 +471,15 @@ $oldGOCACHE = $env:GOCACHE
 $oldGOTOOLCHAIN = $env:GOTOOLCHAIN
 $oldObfSeed = $env:GO_OBF_SEED
 $temporaryOut = $null
+$temporaryHeader = $null
 $temporaryReport = $null
 $temporaryManifest = $null
 $artifactBackup = $null
+$headerBackup = $null
 $reportBackup = $null
 $manifestBackup = $null
 $publishedArtifactWasNew = $false
+$publishedHeaderWasNew = $false
 $publishedReportWasNew = $false
 $publishedManifestWasNew = $false
 try {
@@ -524,39 +530,68 @@ try {
         }
     }
 
-    $temporaryOut = "$outPath.tmp.$PID"
+    $headerPath = $null
+    if ($BuildMode -eq "c-shared") {
+        $headerPath = [System.IO.Path]::ChangeExtension($outPath, ".h")
+        foreach ($recordPath in @($reportPath, $manifestPath)) {
+            if ($recordPath -and [StringComparer]::OrdinalIgnoreCase.Equals($headerPath, $recordPath)) {
+                throw "c-shared header path must differ from report and manifest paths"
+            }
+        }
+    }
+
+    $temporaryOutDirectory = Split-Path -Parent $outPath
+    $temporaryOutBase = [System.IO.Path]::GetFileNameWithoutExtension($outPath)
+    $temporaryOutExtension = [System.IO.Path]::GetExtension($outPath)
+    $temporaryOut = Join-Path $temporaryOutDirectory ("$temporaryOutBase.tmp.$PID$temporaryOutExtension")
     if (Test-Path -LiteralPath $temporaryOut) {
         Remove-Item -LiteralPath $temporaryOut -Force
+    }
+    if ($headerPath) {
+        $temporaryHeader = [System.IO.Path]::ChangeExtension($temporaryOut, ".h")
+        if (Test-Path -LiteralPath $temporaryHeader) {
+            Remove-Item -LiteralPath $temporaryHeader -Force
+        }
     }
 
     $nameFlag = if ($NoObfuscateNames) { "" } else { ",obfnames=1" }
     # The guard binds compiler-generated seals to both linker-patched runtime
     # fields. Diagnostic builds that retain either raw field intentionally do
     # not receive a guard unless they restore the normal protected layout.
-        $runtimeChecksEnabled = -not $NoRuntimeChecks -and -not $NoObfuscateEntryOff -and -not $NoObfuscateMagic
-        $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=3" } else { "" }
+    $runtimeChecksEnabled = -not $NoRuntimeChecks -and -not $NoObfuscateEntryOff -and -not $NoObfuscateMagic
+    $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=3" } else { "" }
     if ($VMBudget -lt 256) {
         throw "VMBudget must be at least 256"
     }
     $gcflags = "$Pattern=-d=obfseedenv=GO_OBF_SEED,obfseedid=$seedFingerprint,obfv4budget=$VMBudget,obfreport=1$nameFlag$runtimeCheckFlag"
-    $args = @("build", "-trimpath", "-gcflags=$gcflags", "-o", $temporaryOut)
+    $args = @("build")
+    if ($BuildMode -ne "default") {
+        $args += "-buildmode=$BuildMode"
+    }
+    $args += @("-trimpath", "-gcflags=$gcflags", "-o", $temporaryOut)
 
     $entryKey = $null
     $magic = $null
-        $runtimeGuardTargetValues = @(& $go env GOOS GOARCH 2>$null)
-        if ($runtimeGuardTargetValues.Count -lt 2) {
-            throw "could not resolve target tuple for Runtime Guard v3"
-        }
-        $runtimeGuardTarget = (([string]$runtimeGuardTargetValues[0]).Trim() + "/" + ([string]$runtimeGuardTargetValues[1]).Trim())
-        $runtimeGuardV3SealLo = $null
-        $runtimeGuardV3SealHi = $null
-        $runtimeGuardV3Bootstrap = $null
-        $runtimeGuardV3Platform = $null
+    $runtimeGuardTargetValues = @(& $go env GOOS GOARCH 2>$null)
+    if ($runtimeGuardTargetValues.Count -lt 2) {
+        throw "could not resolve target tuple for Runtime Guard v3"
+    }
+    $runtimeGuardTarget = (([string]$runtimeGuardTargetValues[0]).Trim() + "/" + ([string]$runtimeGuardTargetValues[1]).Trim())
+    $runtimeGuardV3SealLo = $null
+    $runtimeGuardV3SealHi = $null
+    $runtimeGuardV3Bootstrap = $null
+    $runtimeGuardV3Platform = $null
     $layoutSeed = $null
     $fileNameKey = $null
     $ldflags = @()
     if (-not $KeepSymbols) {
         $ldflags += @("-s", "-w", "-buildid=")
+        # c-shared uses an external linker for its final ELF image. Pass the
+        # strip request through so local obfuscated names do not survive in
+        # that linker's ordinary symbol table.
+        if ($BuildMode -eq "c-shared") {
+            $ldflags += "-extldflags=-s"
+        }
     }
     $hidePclnNames = -not $NoObfuscateNames -and -not $KeepPclnNames
     if ($hidePclnNames) {
@@ -570,18 +605,18 @@ try {
         $magic = Get-ObfPclnMagic -Value $Seed
         $ldflags += @("-obfmagic", "-obfmagicvalue=$magic")
     }
-        if ($runtimeChecksEnabled) {
-            $runtimeGuardV3SealLo = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-lo" -Value $Seed -Target $runtimeGuardTarget
-            $runtimeGuardV3SealHi = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-hi" -Value $Seed -Target $runtimeGuardTarget
-            $runtimeGuardV3Bootstrap = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/bootstrap" -Value $Seed -Target $runtimeGuardTarget
-            $runtimeGuardV3Platform = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/platform" -Value "" -Target $runtimeGuardTarget
-            $ldflags += @(
-                "-obfguardv3",
-                "-obfguardv3seallo=$runtimeGuardV3SealLo",
-                "-obfguardv3sealhi=$runtimeGuardV3SealHi",
-                "-obfguardv3bootstrap=$runtimeGuardV3Bootstrap",
-                "-obfguardv3platform=$runtimeGuardV3Platform"
-            )
+    if ($runtimeChecksEnabled) {
+        $runtimeGuardV3SealLo = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-lo" -Value $Seed -Target $runtimeGuardTarget
+        $runtimeGuardV3SealHi = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-hi" -Value $Seed -Target $runtimeGuardTarget
+        $runtimeGuardV3Bootstrap = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/bootstrap" -Value $Seed -Target $runtimeGuardTarget
+        $runtimeGuardV3Platform = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/platform" -Value "" -Target $runtimeGuardTarget
+        $ldflags += @(
+            "-obfguardv3",
+            "-obfguardv3seallo=$runtimeGuardV3SealLo",
+            "-obfguardv3sealhi=$runtimeGuardV3SealHi",
+            "-obfguardv3bootstrap=$runtimeGuardV3Bootstrap",
+            "-obfguardv3platform=$runtimeGuardV3Platform"
+        )
     }
     if (-not $NoRandomizeLayout) {
         $layoutSeed = Get-ObfLayoutSeed -Value $Seed
@@ -597,6 +632,7 @@ try {
     $args += $Package
 
     Write-Host "compiler: $go"
+    Write-Host "mode:     $BuildMode"
     Write-Host "pattern:  $Pattern"
     Write-Host "seed:     fingerprint=$seedFingerprint"
     Write-Host "seed-source: $seedSource"
@@ -633,6 +669,9 @@ try {
     }
     if ($buildExitCode -ne 0) {
         exit $buildExitCode
+    }
+    if ($temporaryHeader -and -not (Test-Path -LiteralPath $temporaryHeader -PathType Leaf)) {
+        $temporaryHeader = $null
     }
 
     $artifactBytes = $null
@@ -688,6 +727,15 @@ try {
     $temporaryArtifact = Get-Item -LiteralPath $temporaryOut
     $artifactLength = [int64]$temporaryArtifact.Length
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $temporaryOut
+    $headerRecord = $null
+    if ($temporaryHeader) {
+        $temporaryHeaderItem = Get-Item -LiteralPath $temporaryHeader
+        $headerRecord = [ordered]@{
+            path = $headerPath
+            size = [int64]$temporaryHeaderItem.Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $temporaryHeader).Hash.ToLowerInvariant()
+        }
+    }
 
     if ($reportPath) {
         $protectedPrefix = "obf.fn."
@@ -808,6 +856,7 @@ try {
                 package = $Package
                 pattern = $Pattern
                 output = $outPath
+                mode = $BuildMode
                 cache = $Cache
                 gcflags = $gcflags
                 ldflags = ($ldflags -join " ")
@@ -840,6 +889,9 @@ try {
                 size = $artifactLength
                 sha256 = $hash.Hash.ToLowerInvariant()
                 elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+            }
+            auxiliary = [ordered]@{
+                cHeader = $headerRecord
             }
             plaintextScans = @($scanResults)
             metadataScans = @($metadataScanResults)
@@ -877,6 +929,14 @@ try {
         Set-Content -LiteralPath $temporaryReport -Value $json -Encoding UTF8
         if ($manifestPath) {
             $profileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $temporaryReport).Hash.ToLowerInvariant()
+            $manifestHeaderRecord = $null
+            if ($headerRecord) {
+                $manifestHeaderRecord = [ordered]@{
+                    fileName = [System.IO.Path]::GetFileName($headerPath)
+                    size = $headerRecord.size
+                    sha256 = $headerRecord.sha256
+                }
+            }
             $manifestObject = [ordered]@{
                 schema = "go-obf-release-manifest/v1"
                 version = 1
@@ -907,6 +967,10 @@ try {
                     GOOS = $targetGoos
                     GOARCH = $targetGoarch
                     CGO_ENABLED = $targetCgo
+                    mode = $BuildMode
+                }
+                auxiliary = [ordered]@{
+                    cHeader = $manifestHeaderRecord
                 }
                 protection = [ordered]@{
                     runtimeChecks = if ($runtimeChecksEnabled) { "entry-v3" } else { "disabled" }
@@ -926,6 +990,16 @@ try {
     }
     $temporaryOut = $null
     try {
+        if ($temporaryHeader) {
+            if (Test-Path -LiteralPath $headerPath -PathType Leaf) {
+                $headerBackup = "$headerPath.rollback.$PID"
+                [System.IO.File]::Replace($temporaryHeader, $headerPath, $headerBackup, $true)
+            } else {
+                [System.IO.File]::Move($temporaryHeader, $headerPath)
+                $publishedHeaderWasNew = $true
+            }
+            $temporaryHeader = $null
+        }
         if ($reportPath) {
             if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
                 $reportBackup = "$reportPath.rollback.$PID"
@@ -947,6 +1021,14 @@ try {
             $temporaryManifest = $null
         }
     } catch {
+        if ($headerBackup -and (Test-Path -LiteralPath $headerBackup -PathType Leaf)) {
+            $failedHeader = "$headerPath.failed.$PID"
+            [System.IO.File]::Replace($headerBackup, $headerPath, $failedHeader, $true)
+            $headerBackup = $null
+            Remove-Item -LiteralPath $failedHeader -Force -ErrorAction SilentlyContinue
+        } elseif ($publishedHeaderWasNew -and $headerPath -and (Test-Path -LiteralPath $headerPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $headerPath -Force
+        }
         if ($manifestBackup -and (Test-Path -LiteralPath $manifestBackup -PathType Leaf)) {
             $failedManifest = "$manifestPath.failed.$PID"
             [System.IO.File]::Replace($manifestBackup, $manifestPath, $failedManifest, $true)
@@ -978,6 +1060,10 @@ try {
         Remove-Item -LiteralPath $artifactBackup -Force -ErrorAction SilentlyContinue
         $artifactBackup = $null
     }
+    if ($headerBackup -and (Test-Path -LiteralPath $headerBackup)) {
+        Remove-Item -LiteralPath $headerBackup -Force -ErrorAction SilentlyContinue
+        $headerBackup = $null
+    }
     if ($reportBackup -and (Test-Path -LiteralPath $reportBackup)) {
         Remove-Item -LiteralPath $reportBackup -Force -ErrorAction SilentlyContinue
         $reportBackup = $null
@@ -988,6 +1074,9 @@ try {
     }
 
     Write-Host "output:   $outPath"
+    if ($headerRecord) {
+        Write-Host "header:   $headerPath"
+    }
     Write-Host "size:     $artifactLength"
     Write-Host "sha256:   $($hash.Hash)"
     Write-Host ("elapsed:  {0:N3}s" -f $stopwatch.Elapsed.TotalSeconds)
@@ -1000,6 +1089,9 @@ try {
 } finally {
     if ($temporaryOut -and (Test-Path -LiteralPath $temporaryOut)) {
         Remove-Item -LiteralPath $temporaryOut -Force -ErrorAction SilentlyContinue
+    }
+    if ($temporaryHeader -and (Test-Path -LiteralPath $temporaryHeader)) {
+        Remove-Item -LiteralPath $temporaryHeader -Force -ErrorAction SilentlyContinue
     }
     if ($temporaryReport -and (Test-Path -LiteralPath $temporaryReport)) {
         Remove-Item -LiteralPath $temporaryReport -Force -ErrorAction SilentlyContinue

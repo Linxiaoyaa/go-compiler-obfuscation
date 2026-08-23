@@ -389,12 +389,23 @@ func obfEntryOffDomain(nameOff, cuOffset, startLine uint32) uint32 {
 	return x | 1
 }
 
+// obfPclnBuildModeSupported identifies outputs that carry a self-contained Go
+// runtime. Plugins and linkshared images share module metadata with a host and
+// therefore must not install a process-local entry key or pclntab magic.
+func obfPclnBuildModeSupported(mode BuildMode) bool {
+	switch mode {
+	case BuildModeExe, BuildModePIE, BuildModeCShared:
+		return true
+	}
+	return false
+}
+
 func (ctxt *Link) configureObfEntryOff() {
 	if !*flagObfEntryOff {
 		return
 	}
-	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
-		Exitf("-obfentryoff is supported only for executable and PIE builds")
+	if !obfPclnBuildModeSupported(ctxt.BuildMode) {
+		Exitf("-obfentryoff is supported only for executable, PIE, and c-shared builds")
 	}
 	if *flagObfEntryKey == 0 || *flagObfEntryKey > uint64(^uint32(0)) || uint32(*flagObfEntryKey)&1 == 0 || uint32(*flagObfEntryKey) == 0xa5a5a5a5 {
 		Exitf("-obfentrykey must be a non-zero odd 32-bit value")
@@ -415,8 +426,8 @@ func (ctxt *Link) configureObfPclnMagic() {
 	if !*flagObfPclnMagic {
 		return
 	}
-	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
-		Exitf("-obfmagic is supported only for executable and PIE builds")
+	if !obfPclnBuildModeSupported(ctxt.BuildMode) {
+		Exitf("-obfmagic is supported only for executable, PIE, and c-shared builds")
 	}
 	if *flagObfMagicValue == 0 || *flagObfMagicValue > uint64(^uint32(0)) {
 		Exitf("-obfmagicvalue must be a non-zero 32-bit value")
@@ -440,8 +451,8 @@ func (ctxt *Link) configureObfRuntimeGuardV2() {
 	if !*flagObfGuardV2 {
 		return
 	}
-	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
-		Exitf("-obfguardv2 is supported only for executable and PIE builds")
+	if !obfPclnBuildModeSupported(ctxt.BuildMode) {
+		Exitf("-obfguardv2 is supported only for executable, PIE, and c-shared builds")
 	}
 	if !*flagObfEntryOff || !*flagObfPclnMagic {
 		Exitf("-obfguardv2 requires -obfentryoff and -obfmagic")
@@ -467,8 +478,8 @@ func (ctxt *Link) configureObfRuntimeGuardV3() {
 	if !*flagObfGuardV3 {
 		return
 	}
-	if ctxt.BuildMode != BuildModeExe && ctxt.BuildMode != BuildModePIE {
-		Exitf("-obfguardv3 is supported only for executable and PIE builds")
+	if !obfPclnBuildModeSupported(ctxt.BuildMode) {
+		Exitf("-obfguardv3 is supported only for executable, PIE, and c-shared builds")
 	}
 	if !*flagObfEntryOff || !*flagObfPclnMagic {
 		Exitf("-obfguardv3 requires -obfentryoff and -obfmagic")

@@ -48,6 +48,25 @@ func TestObfEntryOffDomain(t *testing.T) {
 	}
 }
 
+func TestObfPclnBuildModeSupported(t *testing.T) {
+	tests := []struct {
+		mode BuildMode
+		want bool
+	}{
+		{BuildModeExe, true},
+		{BuildModePIE, true},
+		{BuildModeCShared, true},
+		{BuildModeCArchive, false},
+		{BuildModeShared, false},
+		{BuildModePlugin, false},
+	}
+	for _, test := range tests {
+		if got := obfPclnBuildModeSupported(test.mode); got != test.want {
+			t.Errorf("obfPclnBuildModeSupported(%s) = %t; want %t", test.mode, got, test.want)
+		}
+	}
+}
+
 func TestObfPclnMagicValue(t *testing.T) {
 	for _, magic := range []uint32{
 		uint32(0xfffffffb), uint32(0xfffffffa), uint32(0xfffffff0), uint32(0xfffffff1), 0,

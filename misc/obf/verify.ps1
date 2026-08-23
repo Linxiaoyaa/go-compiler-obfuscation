@@ -23,6 +23,7 @@ param(
     [switch]$RequireRuntimeGuardV3,
     [switch]$RequireStringV4,
     [switch]$RequireStringV5,
+    [switch]$RequireCHeader,
     [string[]]$RequireFunction = @(),
     [int]$MinReportFunctions = -1,
     [int]$MinV4Aliases = -1,
@@ -361,6 +362,50 @@ Add-Check -Name "artifact.size" -Status $(if ($sizeMatches) { "pass" } else { "f
 $hashMatches = $null -ne $profileArtifact -and ([string]$profileArtifact.sha256).ToLowerInvariant() -eq $artifactHash
 Add-Check -Name "artifact.sha256" -Status $(if ($hashMatches) { "pass" } else { "fail" }) -Expected $(if ($null -eq $profileArtifact) { $null } else { $profileArtifact.sha256 }) -Actual $artifactHash
 
+$profileCHeader = if ($null -eq $profileObject.auxiliary) { $null } else { $profileObject.auxiliary.cHeader }
+$verifiedCHeaderPath = ""
+$verifiedCHeaderSize = $null
+$verifiedCHeaderHash = ""
+if ($RequireCHeader -or $null -ne $profileCHeader) {
+    if ($null -eq $profileCHeader) {
+        Add-Check -Name "c-header.profile" -Status "fail" -Expected "recorded C header" -Actual "missing"
+    } else {
+        $headerPathText = [string]$profileCHeader.path
+        $headerPathValid = $false
+        if ($headerPathText) {
+            try {
+                $verifiedCHeaderPath = Resolve-UserPath -Value $headerPathText
+                $headerPathValid = $true
+            } catch {
+                $headerPathValid = $false
+            }
+        }
+        Add-Check -Name "c-header.path" -Status $(if ($headerPathValid) { "pass" } else { "fail" }) -Expected "file path" -Actual $headerPathText
+        if ($headerPathValid) {
+            $headerExists = Test-Path -LiteralPath $verifiedCHeaderPath -PathType Leaf
+            Add-Check -Name "c-header.exists" -Status $(if ($headerExists) { "pass" } else { "fail" }) -Expected $true -Actual $headerExists
+            if ($headerExists) {
+                $headerItem = Get-Item -LiteralPath $verifiedCHeaderPath
+                $headerProfileSize = $null
+                $headerProfileSizeValid = $false
+                try {
+                    if ($null -ne $profileCHeader.size) {
+                        $headerProfileSize = [int64]$profileCHeader.size
+                        $headerProfileSizeValid = $true
+                    }
+                } catch {
+                    $headerProfileSizeValid = $false
+                }
+                $verifiedCHeaderSize = [int64]$headerItem.Length
+                Add-Check -Name "c-header.size" -Status $(if ($headerProfileSizeValid -and $headerProfileSize -eq $verifiedCHeaderSize) { "pass" } else { "fail" }) -Expected $headerProfileSize -Actual $verifiedCHeaderSize
+                $verifiedCHeaderHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedCHeaderPath).Hash.ToLowerInvariant()
+                $headerProfileHash = [string]$profileCHeader.sha256
+                Add-Check -Name "c-header.sha256" -Status $(if ($headerProfileHash -match '^[0-9a-fA-F]{64}$' -and $headerProfileHash.ToLowerInvariant() -eq $verifiedCHeaderHash) { "pass" } else { "fail" }) -Expected $headerProfileHash -Actual $verifiedCHeaderHash
+            }
+        }
+    }
+}
+
 $compilerProfile = $profileObject.compiler
 $compilerPathToCheck = $CompilerPath
 if (-not $compilerPathToCheck -and $compilerProfile -and $compilerProfile.path) {
@@ -686,6 +731,16 @@ if ($null -ne $manifestObject) {
     Add-Check -Name "manifest.artifact.sha256" -Status $(if ([string]$manifestObject.artifact.sha256 -eq $artifactHash) { "pass" } else { "fail" }) -Expected $artifactHash -Actual $manifestObject.artifact.sha256
     Add-Check -Name "manifest.artifact.size" -Status $(if ([int64]$manifestObject.artifact.size -eq [int64]$artifactItem.Length) { "pass" } else { "fail" }) -Expected ([int64]$artifactItem.Length) -Actual $manifestObject.artifact.size
     Add-Check -Name "manifest.profile.sha256" -Status $(if ([string]$manifestObject.profile.sha256 -eq $profileFileHash) { "pass" } else { "fail" }) -Expected $profileFileHash -Actual $manifestObject.profile.sha256
+    $manifestCHeader = if ($null -eq $manifestObject.auxiliary) { $null } else { $manifestObject.auxiliary.cHeader }
+    if ($RequireCHeader -or $null -ne $profileCHeader -or $null -ne $manifestCHeader) {
+        $manifestHeaderPresent = $null -ne $manifestCHeader
+        Add-Check -Name "manifest.c-header.record" -Status $(if ($manifestHeaderPresent -and $null -ne $profileCHeader) { "pass" } else { "fail" }) -Expected "profile-bound C header" -Actual $(if ($manifestHeaderPresent) { "present" } else { "missing" })
+        if ($manifestHeaderPresent -and $null -ne $profileCHeader) {
+            Add-Check -Name "manifest.c-header.filename" -Status $(if ([string]$manifestCHeader.fileName -eq [System.IO.Path]::GetFileName([string]$profileCHeader.path)) { "pass" } else { "fail" }) -Expected ([System.IO.Path]::GetFileName([string]$profileCHeader.path)) -Actual $manifestCHeader.fileName
+            Add-Check -Name "manifest.c-header.size" -Status $(if ([int64]$manifestCHeader.size -eq [int64]$profileCHeader.size) { "pass" } else { "fail" }) -Expected $profileCHeader.size -Actual $manifestCHeader.size
+            Add-Check -Name "manifest.c-header.sha256" -Status $(if ([string]$manifestCHeader.sha256 -eq [string]$profileCHeader.sha256) { "pass" } else { "fail" }) -Expected $profileCHeader.sha256 -Actual $manifestCHeader.sha256
+        }
+    }
     $manifestCompilerHash = [string]$manifestObject.compiler.sha256
     $compilerHashForManifest = if ($actualCompilerHash) { $actualCompilerHash } elseif ($compilerProfile) { [string]$compilerProfile.sha256 } else { "" }
     Add-Check -Name "manifest.compiler.sha256" -Status $(if ($manifestCompilerHash -and $manifestCompilerHash -eq $compilerHashForManifest) { "pass" } else { "fail" }) -Expected $compilerHashForManifest -Actual $manifestCompilerHash
@@ -704,6 +759,9 @@ if ($null -ne $manifestObject) {
         Add-Check -Name "manifest.target.goos" -Status $(if ([string]$manifestObject.build.GOOS -eq [string]$buildProfile.target.GOOS) { "pass" } else { "fail" }) -Expected $buildProfile.target.GOOS -Actual $manifestObject.build.GOOS
         Add-Check -Name "manifest.target.goarch" -Status $(if ([string]$manifestObject.build.GOARCH -eq [string]$buildProfile.target.GOARCH) { "pass" } else { "fail" }) -Expected $buildProfile.target.GOARCH -Actual $manifestObject.build.GOARCH
         Add-Check -Name "manifest.target.cgo" -Status $(if ([string]$manifestObject.build.CGO_ENABLED -eq [string]$buildProfile.target.CGO_ENABLED) { "pass" } else { "fail" }) -Expected $buildProfile.target.CGO_ENABLED -Actual $manifestObject.build.CGO_ENABLED
+    }
+    if ($buildProfile -and $null -ne $buildProfile.mode) {
+        Add-Check -Name "manifest.build.mode" -Status $(if ([string]$manifestObject.build.mode -eq [string]$buildProfile.mode) { "pass" } else { "fail" }) -Expected $buildProfile.mode -Actual $manifestObject.build.mode
     }
     if ($manifestObject.protection) {
         Add-Check -Name "manifest.protection.runtime-checks" -Status $(if ([string]$manifestObject.protection.runtimeChecks -eq $runtimeCheckMode) { "pass" } else { "fail" }) -Expected $runtimeCheckMode -Actual $manifestObject.protection.runtimeChecks

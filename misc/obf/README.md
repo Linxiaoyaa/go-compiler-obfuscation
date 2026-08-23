@@ -93,6 +93,20 @@ D:\Projection\GoProject\go-compiler\misc\obf\build.ps1 `
 
 The script generates a random seed unless `-Seed` is supplied, strips symbols by default, hashes protected linker symbols, removes those hashes from runtime pclntab, hashes runtime source file names, encodes function entry offsets, customizes the pclntab magic, writes Runtime Guard v3 bootstrap/image/platform words, enables entry integrity checks, randomizes function layout, and uses a dedicated V13 build cache. Each `-ScanPlaintext` value is searched as UTF-8 bytes in the completed executable; any match fails the build. Use `-KeepPclnNames` for hashed-name diagnostics, `-NoObfuscateNames` for a stable-name diagnostic build, `-NoObfuscateEntryOff` to inspect raw entry offsets, `-NoObfuscateMagic` to retain the standard pclntab magic, `-NoRuntimeChecks` to remove entry gates, `-NoRandomizeLayout` for stable function order, or `-NoObfuscateFileNames` for original runtime file names. The separate cache is required because this fork adds versioned protection fields to unified IR export data.
 
+`-BuildMode` accepts `default`, `exe`, `pie`, and `c-shared`. The c-shared path receives the same encoded pclntab, Runtime Guard v3, layout, filename, and protected-name treatment as EXE/PIE. It forwards stripping to the external ELF linker, publishes the generated C header alongside the library, and records both header and build mode in the profile and manifest.
+
+### Full EXE and SO demo
+
+The checked-in `testdata/fullrelease` module demonstrates the strongest compatible directive coverage: VM v4, native constant encryption, String v3/v4/v5, Runtime Guard v3, hidden protected names, encoded entry offsets, custom pclntab magic, randomized layout, and hashed source metadata. The C ABI bridge and executable launcher contain no secrets because cgo ABI and multi-block entry functions are outside the current strict SSA directive boundary.
+
+```powershell
+& 'D:\Projection\GoProject\go-compiler\misc\obf\build-full-demo.ps1' `
+  -OutDir .\work\full-protect-demo
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
+On Windows, the script executes the generated `full-protect.exe`, then uses Zig to cross-build `full-protect.so` for Linux AMD64. It requires `zig` and a GNU/LLVM-compatible `nm` on `PATH`. It verifies both release records, scans protected plaintext values, validates the ELF header, validates the generated `full-protect.h`, confirms the required dynamic C export, and requires strict Runtime Guard v3 plus String v4/v5 coverage.
+
 ### Build profiles and independent verification
 
 Pass `-Report <path>` to write a `go-obf-profile/v2` JSON profile after a successful build. The profile records the compiler version, binary hash, source-tree digest and revision, target tuple, final pattern, protection modes, artifact size/hash/elapsed time, marker offsets/counts, parsed `OBFREPORT` summaries, and digest-only plaintext/metadata scan results. Pass `-Manifest <path>` to additionally write a `go-obf-release-manifest/v1` record binding artifact/profile/compiler/source/target/seed fingerprints. The profile and manifest also bind the build, verification, matrix, and integrity-test scripts by SHA-256. The raw seed is never written to the profile or compiler command line when the default environment-seed path is used. Relative `-Out`, `-Report`, `-Manifest`, `-Cache`, and `-SeedFile` paths resolve against the caller's current directory. The linker output, profile, and manifest are prepared in same-directory temporary files and published only after compilation and scans succeed.

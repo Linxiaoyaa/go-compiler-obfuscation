@@ -637,8 +637,8 @@ var obfRuntimeGuardV2Seal uint64 = obfRuntimeGuardV2Unpatched
 
 // Runtime Guard v3 binds the function gate to two independent image seals and
 // the target platform word. The linker patches these fields for protected
-// executable/PIE images; sentinel values keep ordinary tool and test builds
-// compatible with the unmodified runtime path.
+// executable, PIE, and c-shared images; sentinel values keep ordinary tool and
+// test builds compatible with the unmodified runtime path.
 const obfRuntimeGuardV3Unpatched uint64 = 0xa5a5a5a5a5a5a5a5
 
 var obfRuntimeGuardV3Seal [2]uint64 = [2]uint64{obfRuntimeGuardV3Unpatched, obfRuntimeGuardV3Unpatched}
