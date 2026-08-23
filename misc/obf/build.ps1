@@ -16,6 +16,8 @@ param(
     [string]$Report = "",
     [string]$Manifest = "",
     [int]$VMBudget = 2048,
+    [int]$NativeBudget = 48,
+    [switch]$SSACheck,
     [string[]]$ScanPlaintext = @(),
     [string[]]$ScanMetadata = @(),
     [switch]$NoDefaultMetadataScan,
@@ -563,7 +565,11 @@ try {
     if ($VMBudget -lt 256) {
         throw "VMBudget must be at least 256"
     }
-    $gcflags = "$Pattern=-d=obfseedenv=GO_OBF_SEED,obfseedid=$seedFingerprint,obfv4budget=$VMBudget,obfreport=1$nameFlag$runtimeCheckFlag"
+    if ($NativeBudget -lt 1) {
+        throw "NativeBudget must be at least 1"
+    }
+    $ssaCheckFlag = if ($SSACheck) { ",ssa/check/on" } else { "" }
+    $gcflags = "$Pattern=-d=obfseedenv=GO_OBF_SEED,obfseedid=$seedFingerprint,obfv4budget=$VMBudget,obfnativebudget=$NativeBudget,obfreport=1$nameFlag$runtimeCheckFlag$ssaCheckFlag"
     $args = @("build")
     if ($BuildMode -ne "default") {
         $args += "-buildmode=$BuildMode"
@@ -882,6 +888,7 @@ try {
                 fileNames = if ($NoObfuscateFileNames) { "original" } else { "hashed-pclntab" }
                 stringRuntime = "v2+v3-ephemeral+v4-stream+v5-lease"
                 vm = "v4-budgeted"
+                nativeCFG = [ordered]@{ version = "v2"; budget = $NativeBudget; ssaCheck = [bool]$SSACheck }
                 runtimeChecks = if ($runtimeChecksEnabled) { "entry-v3" } else { "disabled" }
             }
             artifact = [ordered]@{

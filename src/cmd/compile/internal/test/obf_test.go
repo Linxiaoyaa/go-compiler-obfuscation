@@ -18,6 +18,57 @@ func protectedNativeCalc(a, b uint64) uint64 {
 	return (a + 0x0f1e2d3c4b5a6978) ^ (b * 5)
 }
 
+//go:noinline
+func protectedNativeCall(v uint64) uint64 {
+	return ((v ^ 0x7f4a7c159e3779b9) * 9) + 0x94d049bb133111eb
+}
+
+//go:noinline
+//go:obf
+//go:encrypt
+func protectedNativeBranch(a, b uint64) uint64 {
+	if a < b {
+		return protectedNativeCall((a ^ 0x1020304050607080) + b)
+	}
+	if a&1 == 0 {
+		return protectedNativeCall((a + 0x0badf00ddeadbeef) ^ b)
+	}
+	return protectedNativeCall((a - b) ^ 0x55aa55aa55aa55aa)
+}
+
+//go:noinline
+//go:obf
+//go:encrypt
+func protectedNativeLoopCall(n, seed uint64) uint64 {
+	state := seed
+	for i := uint64(0); i < n; i++ {
+		if i&1 == 0 {
+			state = protectedNativeCall(state ^ i)
+		} else {
+			state = protectedNativeCall(state + i)
+		}
+	}
+	return state
+}
+
+var protectedNativeDeferred uint64
+
+//go:noinline
+func protectedNativeRecordDeferred(v uint64) {
+	protectedNativeDeferred ^= v
+}
+
+//go:noinline
+//go:obf
+//go:encrypt
+func protectedNativeDefer(v uint64) uint64 {
+	defer protectedNativeRecordDeferred(v)
+	if v&1 == 0 {
+		return v ^ 0x3141592653589793
+	}
+	return v + 0x2718281828459045
+}
+
 //go:noprotect
 func unprotectedCalc(a, b uint64) uint64 {
 	return a + b
@@ -134,6 +185,45 @@ func TestProtectionDirectives(t *testing.T) {
 		nativeWant := (a + 0x0f1e2d3c4b5a6978) ^ (b * 5)
 		if got := protectedNativeCalc(a, b); got != nativeWant {
 			t.Fatalf("protectedNativeCalc(%#x, %#x) = %#x; want %#x", a, b, got, nativeWant)
+		}
+		nativeCallWant := func(v uint64) uint64 {
+			return ((v ^ 0x7f4a7c159e3779b9) * 9) + 0x94d049bb133111eb
+		}
+		nativeBranchWant := func() uint64 {
+			if a < b {
+				return nativeCallWant((a ^ 0x1020304050607080) + b)
+			}
+			if a&1 == 0 {
+				return nativeCallWant((a + 0x0badf00ddeadbeef) ^ b)
+			}
+			return nativeCallWant((a - b) ^ 0x55aa55aa55aa55aa)
+		}()
+		if got := protectedNativeBranch(a, b); got != nativeBranchWant {
+			t.Fatalf("protectedNativeBranch(%#x, %#x) = %#x; want %#x", a, b, got, nativeBranchWant)
+		}
+		for _, n := range []uint64{0, 1, 2, 7, 19} {
+			loopWant := b
+			for i := uint64(0); i < n; i++ {
+				if i&1 == 0 {
+					loopWant = nativeCallWant(loopWant ^ i)
+				} else {
+					loopWant = nativeCallWant(loopWant + i)
+				}
+			}
+			if got := protectedNativeLoopCall(n, b); got != loopWant {
+				t.Fatalf("protectedNativeLoopCall(%#x, %#x) = %#x; want %#x", n, b, got, loopWant)
+			}
+		}
+		beforeDefer := protectedNativeDeferred
+		deferWant := a + 0x2718281828459045
+		if a&1 == 0 {
+			deferWant = a ^ 0x3141592653589793
+		}
+		if got := protectedNativeDefer(a); got != deferWant {
+			t.Fatalf("protectedNativeDefer(%#x) = %#x; want %#x", a, got, deferWant)
+		}
+		if got := protectedNativeDeferred; got != beforeDefer^a {
+			t.Fatalf("protectedNativeDeferred = %#x; want %#x", got, beforeDefer^a)
 		}
 		if got := unprotectedCalc(a, b); got != a+b {
 			t.Fatalf("unprotectedCalc(%#x, %#x) = %#x; want %#x", a, b, got, a+b)

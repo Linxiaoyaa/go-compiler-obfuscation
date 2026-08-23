@@ -27,6 +27,8 @@ param(
     [string[]]$RequireFunction = @(),
     [int]$MinReportFunctions = -1,
     [int]$MinV4Aliases = -1,
+    [switch]$RequireNativeCFG,
+    [switch]$RequireNativeCFGFull,
     [string[]]$ForbiddenText = @(),
     [string[]]$ForbiddenMetadata = @(),
     [string[]]$ExpectedAbsent = @()
@@ -537,6 +539,19 @@ if ($MinV4Aliases -ge 0) {
     })
     $aliasMinimum = if ($aliasValues.Count -eq 0) { 0 } else { ($aliasValues | Measure-Object -Minimum).Minimum }
     Add-Check -Name "coverage.minimum-v4-aliases" -Status $(if ($aliasMinimum -ge $MinV4Aliases) { "pass" } else { "fail" }) -Expected ">=$MinV4Aliases" -Actual $aliasMinimum
+}
+if ($RequireNativeCFG -or $RequireNativeCFGFull) {
+    $nativeCFGReports = @($reportFunctions | Where-Object {
+        ([string]$_.applied) -match '(^|\s)obf=cfg-opaque-dispatch-v2(\s|$)'
+    })
+    Add-Check -Name "coverage.native-cfg-v2" -Status $(if ($nativeCFGReports.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $nativeCFGReports.Count
+    if ($RequireNativeCFGFull) {
+        $nativeFullReports = @($nativeCFGReports | Where-Object {
+            ([string]$_.applied) -match '(^|\s)coverage=full(\s|$)'
+        })
+        $nativeFullOK = $nativeCFGReports.Count -gt 0 -and $nativeFullReports.Count -eq $nativeCFGReports.Count
+        Add-Check -Name "coverage.native-cfg-v2.full" -Status $(if ($nativeFullOK) { "pass" } else { "fail" }) -Expected "all native CFG v2 reports" -Actual "$($nativeFullReports.Count)/$($nativeCFGReports.Count)"
+    }
 }
 foreach ($requiredFunction in @($RequireFunction | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })) {
     $requiredName = [string]$requiredFunction

@@ -36,7 +36,7 @@ const protectedFunctionFlags = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.Prot
 // propagated linker references change. It returns false for ABI-sensitive or
 // special entry points that must retain their conventional names.
 func ObfuscateProtectedFuncLinkname(fn *ir.Func, seed string) (string, bool) {
-	if fn == nil || fn.Nname == nil || fn.Protection&protectedFunctionFlags == 0 {
+	if fn == nil || fn.Nname == nil || !hasProtectedFunctionOwner(fn) {
 		return "", false
 	}
 	if fn.IsPackageInit() || fn.ABIWrapper() || fn.WasmExport != nil || fn.ABI != obj.ABIInternal {
@@ -51,15 +51,16 @@ func ObfuscateProtectedFuncLinkname(fn *ir.Func, seed string) (string, bool) {
 		return "", false
 	}
 	// Methods participate in wrapper generation, interface method sets, and
-	// reflection metadata; keep their linker identity stable in this first
-	// version. Top-level exported functions are also left alone because external
-	// linkname/plugin users cannot be rewritten by this compiler alone.
-	method := strings.LastIndexByte(name, '.') >= 0
+	// reflection metadata; keep their linker identity stable. Compiler-created
+	// closures and defer wrappers also contain dots, but are local implementation
+	// details and must inherit the protected owner's hashed symbol identity.
+	closure := fn.ClosureParent != nil
+	method := !closure && strings.LastIndexByte(name, '.') >= 0
 	localName := name
 	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
 		localName = name[dot+1:]
 	}
-	if method || types.IsExported(localName) {
+	if method || (!closure && types.IsExported(localName)) {
 		return "", false
 	}
 
@@ -72,6 +73,18 @@ func ObfuscateProtectedFuncLinkname(fn *ir.Func, seed string) (string, bool) {
 	linkname := "obf.fn." + hex.EncodeToString(digest[:16])
 	sym.Linkname = linkname
 	return linkname, true
+}
+
+// hasProtectedFunctionOwner follows compiler-generated closure ownership so a
+// protected function cannot leak its source name through .funcN, .gowrapN, or
+// .deferwrapN symbols. These helpers have no externally callable identity.
+func hasProtectedFunctionOwner(fn *ir.Func) bool {
+	for current := fn; current != nil; current = current.ClosureParent {
+		if current.Protection&protectedFunctionFlags != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ObfuscatedStringSym emits an encrypted backing symbol for a string literal

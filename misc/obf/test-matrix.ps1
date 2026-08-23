@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $fixture = Join-Path $PSScriptRoot "testdata\v38matrix"
+$nativeFixture = Join-Path $PSScriptRoot "testdata\nativecfg"
 if (-not $OutDir) {
     $OutDir = Join-Path $root "work\v38-cross-platform"
 } elseif (-not [System.IO.Path]::IsPathRooted($OutDir)) {
@@ -64,6 +65,54 @@ try {
         }
         Write-Output "negative pass: $($negative.Name) stream escape rejected (exit=$negativeExitCode)"
     }
+
+    $nativeArtifact = Join-Path $OutDir "nativecfg.exe"
+    $nativeProfile = Join-Path $OutDir "nativecfg.profile.json"
+    $nativeManifest = Join-Path $OutDir "nativecfg.manifest.json"
+    $nativeCache = Join-Path $OutDir "nativecfg-cache"
+    $env:GOOS = "windows"
+    $env:GOARCH = "amd64"
+    $env:CGO_ENABLED = "0"
+    $env:GO_OBF_SEED = "nativecfg-matrix-windows-amd64"
+    Push-Location $nativeFixture
+    try {
+        & (Join-Path $PSScriptRoot "build.ps1") `
+            -Package . `
+            -Out $nativeArtifact `
+            -Report $nativeProfile `
+            -Manifest $nativeManifest `
+            -Cache $nativeCache `
+            -VMBudget 512 `
+            -NativeBudget 48 `
+            -SSACheck
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        Pop-Location
+    }
+    $nativeVerifyArgs = @{
+        Artifact = $nativeArtifact
+        Profile = $nativeProfile
+        Manifest = $nativeManifest
+        CompilerRoot = $root
+        RequireCompilerBinary = $true
+        RequireCompilerSource = $true
+        RequireTooling = $true
+        RequireRuntimeGuardV3 = $true
+        RequireNativeCFG = $true
+        RequireNativeCFGFull = $true
+        RequireFunction = @("main.nativeBranch", "main.nativeLoopCall", "main.nativeDefer", "main.nativeBool", "main.nativeZeroArg")
+        MinReportFunctions = 5
+    }
+    if ($RequireCleanCompiler) {
+        $nativeVerifyArgs.RequireCleanCompiler = $true
+    }
+    & (Join-Path $PSScriptRoot "verify.ps1") @nativeVerifyArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($env:OS -eq "Windows_NT") {
+        & $nativeArtifact
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    Write-Output "matrix pass: native CFG v2 windows/amd64"
 
     foreach ($tuple in $Target) {
         if ($tuple -notmatch '^([a-z0-9]+)/(\w+)$') {

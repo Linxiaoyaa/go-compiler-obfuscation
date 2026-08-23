@@ -61,6 +61,7 @@ type DebugFlags struct {
 	NoOpenDefer           int    `help:"disable open-coded defers" concurrent:"ok"`
 	NoRefName             int    `help:"do not include referenced symbol names in object file" concurrent:"ok"`
 	ObfNames              int    `help:"replace names of explicitly protected non-exported functions with deterministic hash names" concurrent:"ok"`
+	ObfNativeBudget       int    `help:"maximum native CFG opaque-dispatch edges per protected function" concurrent:"ok"`
 	ObfReport             int    `help:"report application of //go:obf, //go:encrypt, and //go:vm" concurrent:"ok"`
 	ObfSeed               string `help:"deterministic seed for protection transformations" concurrent:"ok"`
 	ObfSeedEnv            string `help:"read the protection seed from this environment variable when obfseed is empty" concurrent:"ok"`

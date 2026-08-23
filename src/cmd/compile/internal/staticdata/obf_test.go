@@ -170,4 +170,10 @@ func TestObfuscateProtectedFuncLinkname(t *testing.T) {
 	if got, ok := ObfuscateProtectedFuncLinkname(abi0, "seed-a"); ok || got != "" {
 		t.Fatalf("ABI0 function was renamed to %q", got)
 	}
+
+	closure := ir.NewFunc(src.NoXPos, src.NoXPos, pkg.Lookup("privateWorker.deferwrap1"), types.NewSignature(nil, nil, nil))
+	closure.ClosureParent = fn
+	if got, ok := ObfuscateProtectedFuncLinkname(closure, "seed-a"); !ok || !strings.HasPrefix(got, "obf.fn.") {
+		t.Fatalf("protected defer wrapper was not renamed: %q, %t", got, ok)
+	}
 }
