@@ -287,6 +287,95 @@ func obfStringWipeV5(lease *uint64) {
 	*lease = 0
 }
 
+// String v6 extends the lease-bound stream decoder with an independently
+// derived ticket. Both capability words are checked at the token boundary and
+// every byte boundary, then wiped before the decoded byte can leave runtime.
+
+//go:noinline
+func obfStringTokenV6A(src *byte, n int, k0, k1, k2, k3, lease, ticket uint64) (*byte, int) {
+	return obfStringTokenV6(src, n, k0, k1, k2, k3, lease, ticket, 0)
+}
+
+//go:noinline
+func obfStringTokenV6B(src *byte, n int, k0, k1, k2, k3, lease, ticket uint64) (*byte, int) {
+	return obfStringTokenV6(src, n, k0, k1, k2, k3, lease, ticket, 1)
+}
+
+//go:noinline
+func obfStringTokenV6C(src *byte, n int, k0, k1, k2, k3, lease, ticket uint64) (*byte, int) {
+	return obfStringTokenV6(src, n, k0, k1, k2, k3, lease, ticket, 2)
+}
+
+//go:noinline
+func obfStringTokenV6D(src *byte, n int, k0, k1, k2, k3, lease, ticket uint64) (*byte, int) {
+	return obfStringTokenV6(src, n, k0, k1, k2, k3, lease, ticket, 3)
+}
+
+func obfStringTokenV6(src *byte, n int, k0, k1, k2, k3, lease, ticket uint64, decoder uint8) (*byte, int) {
+	if n <= 0 {
+		return nil, 0
+	}
+	if src == nil || lease == 0 || ticket == 0 {
+		throw("invalid protected string ticket token")
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	if key[0]^key[1]^key[2]^key[3]^lease^rotateObf64(ticket, uint(decoder*13))^uint64(n) == 0x9b05688c2b3e6c1f {
+		throw("invalid protected string ticket token")
+	}
+	obfStringWipeV2(&key)
+	obfStringWipeV5(&lease)
+	obfStringWipeV6(&ticket)
+	return src, n
+}
+
+//go:noinline
+func obfStringByteV6A(src *byte, n, index int, k0, k1, k2, k3, lease, ticket uint64) byte {
+	return obfStringByteV6(src, n, index, k0, k1, k2, k3, lease, ticket, 0)
+}
+
+//go:noinline
+func obfStringByteV6B(src *byte, n, index int, k0, k1, k2, k3, lease, ticket uint64) byte {
+	return obfStringByteV6(src, n, index, k0, k1, k2, k3, lease, ticket, 1)
+}
+
+//go:noinline
+func obfStringByteV6C(src *byte, n, index int, k0, k1, k2, k3, lease, ticket uint64) byte {
+	return obfStringByteV6(src, n, index, k0, k1, k2, k3, lease, ticket, 2)
+}
+
+//go:noinline
+func obfStringByteV6D(src *byte, n, index int, k0, k1, k2, k3, lease, ticket uint64) byte {
+	return obfStringByteV6(src, n, index, k0, k1, k2, k3, lease, ticket, 3)
+}
+
+func obfStringByteV6(src *byte, n, index int, k0, k1, k2, k3, lease, ticket uint64, decoder uint8) byte {
+	if src == nil || n <= 0 || index < 0 || index >= n || lease == 0 || ticket == 0 {
+		throw("protected string ticket byte index out of range")
+	}
+	key := obfStringKeyV2{k0, k1, k2, k3}
+	value := *(*byte)(add(unsafe.Pointer(src), uintptr(index))) ^ obfStringMaskV6(key, lease, ticket, decoder, index)
+	obfStringWipeV2(&key)
+	obfStringWipeV5(&lease)
+	obfStringWipeV6(&ticket)
+	return value
+}
+
+func obfStringMaskV6(key obfStringKeyV2, lease, ticket uint64, decoder uint8, index int) byte {
+	i := uint64(index)
+	x := ticket ^ rotateObf64(lease, uint((i+uint64(decoder)*13)&63))
+	x += key[(i+uint64(decoder)*3)&3] + i*0x9e3779b185ebca87
+	x ^= rotateObf64(key[(i+uint64(decoder)+2)&3]^ticket, uint((i+29)&63))
+	x ^= x >> 27
+	x *= 0xd6e8feb86659fd93
+	x ^= x >> 33
+	return obfStringMaskV5(key, lease, decoder, index) ^ byte(x>>uint((i&7)*8))
+}
+
+//go:noinline
+func obfStringWipeV6(ticket *uint64) {
+	*ticket = 0
+}
+
 //go:noinline
 func obfStringDataV2A(src *byte, n int, k0, k1, k2, k3 uint64) (*byte, int) {
 	if n <= 0 {

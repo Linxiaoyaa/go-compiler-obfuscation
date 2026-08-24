@@ -21,14 +21,17 @@ param(
     [switch]$RequireCleanCompiler,
     [switch]$RequireRuntimeChecks,
     [switch]$RequireRuntimeGuardV3,
+    [switch]$RequireRuntimeGuardV4,
     [switch]$RequireStringV4,
     [switch]$RequireStringV5,
+    [switch]$RequireStringV6,
     [switch]$RequireCHeader,
     [string[]]$RequireFunction = @(),
     [int]$MinReportFunctions = -1,
     [int]$MinV4Aliases = -1,
     [switch]$RequireNativeCFG,
     [switch]$RequireNativeCFGFull,
+    [switch]$RequireResidualScan,
     [string[]]$ForbiddenText = @(),
     [string[]]$ForbiddenMetadata = @(),
     [string[]]$ExpectedAbsent = @()
@@ -94,6 +97,29 @@ function Find-ByteSequenceCount {
         }
     }
     return $count
+}
+
+function Get-ResidualScanCandidates {
+    param([string]$Value)
+
+    $forms = @(
+        [pscustomobject]@{ variant = "raw"; value = $Value },
+        [pscustomobject]@{ variant = "slash-forward"; value = $Value.Replace('\', '/') },
+        [pscustomobject]@{ variant = "slash-backward"; value = $Value.Replace('/', '\') }
+    )
+    foreach ($form in $forms) {
+        foreach ($encoding in @(
+            [pscustomobject]@{ name = "utf-8"; codec = [System.Text.Encoding]::UTF8 },
+            [pscustomobject]@{ name = "utf-16le"; codec = [System.Text.Encoding]::Unicode }
+        )) {
+            [pscustomobject]@{
+                encoding = $encoding.name
+                variant = $form.variant
+                value = [string]$form.value
+                bytes = $encoding.codec.GetBytes([string]$form.value)
+            }
+        }
+    }
 }
 
 function Get-Sha256Text {
@@ -542,15 +568,15 @@ if ($MinV4Aliases -ge 0) {
 }
 if ($RequireNativeCFG -or $RequireNativeCFGFull) {
     $nativeCFGReports = @($reportFunctions | Where-Object {
-        ([string]$_.applied) -match '(^|\s)obf=cfg-opaque-dispatch-v2(\s|$)'
+        ([string]$_.applied) -match '(^|\s)obf=cfg-opaque-dispatch-v3(\s|$)'
     })
-    Add-Check -Name "coverage.native-cfg-v2" -Status $(if ($nativeCFGReports.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $nativeCFGReports.Count
+    Add-Check -Name "coverage.native-cfg-v3" -Status $(if ($nativeCFGReports.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $nativeCFGReports.Count
     if ($RequireNativeCFGFull) {
         $nativeFullReports = @($nativeCFGReports | Where-Object {
             ([string]$_.applied) -match '(^|\s)coverage=full(\s|$)'
         })
         $nativeFullOK = $nativeCFGReports.Count -gt 0 -and $nativeFullReports.Count -eq $nativeCFGReports.Count
-        Add-Check -Name "coverage.native-cfg-v2.full" -Status $(if ($nativeFullOK) { "pass" } else { "fail" }) -Expected "all native CFG v2 reports" -Actual "$($nativeFullReports.Count)/$($nativeCFGReports.Count)"
+        Add-Check -Name "coverage.native-cfg-v3.full" -Status $(if ($nativeFullOK) { "pass" } else { "fail" }) -Expected "all native CFG v3 reports" -Actual "$($nativeFullReports.Count)/$($nativeCFGReports.Count)"
     }
 }
 foreach ($requiredFunction in @($RequireFunction | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })) {
@@ -566,10 +592,10 @@ $hashedFunctions = @($protectedFunctions | Where-Object {
 })
 
 $runtimeCheckMode = if ($null -eq $protection) { "" } else { [string]$protection.runtimeChecks }
-if ($RequireRuntimeChecks -or $RequireRuntimeGuardV3) {
-    $runtimeVersion = if ($runtimeCheckMode -eq "entry-v3") { "v3" } elseif ($runtimeCheckMode -eq "entry-v2") { "v2" } else { "" }
-    $runtimeModeExpected = if ($RequireRuntimeGuardV3) { "entry-v3" } else { "entry-v3 or entry-v2" }
-    $runtimeModeOK = if ($RequireRuntimeGuardV3) { $runtimeVersion -eq "v3" } else { [bool]$runtimeVersion }
+if ($RequireRuntimeChecks -or $RequireRuntimeGuardV3 -or $RequireRuntimeGuardV4) {
+    $runtimeVersion = if ($runtimeCheckMode -eq "entry-v4") { "v4" } elseif ($runtimeCheckMode -eq "entry-v3") { "v3" } elseif ($runtimeCheckMode -eq "entry-v2") { "v2" } else { "" }
+    $runtimeModeExpected = if ($RequireRuntimeGuardV4) { "entry-v4" } elseif ($RequireRuntimeGuardV3) { "entry-v3" } else { "entry-v4, entry-v3, or entry-v2" }
+    $runtimeModeOK = if ($RequireRuntimeGuardV4) { $runtimeVersion -eq "v4" } elseif ($RequireRuntimeGuardV3) { $runtimeVersion -eq "v3" } else { [bool]$runtimeVersion }
     Add-Check -Name "runtime-checks.profile" -Status $(if ($runtimeModeOK) { "pass" } else { "fail" }) -Expected $runtimeModeExpected -Actual $runtimeCheckMode
     $guardedFunctions = @($protectedFunctions | Where-Object {
         ([string]$_.applied) -match ("(^|\s)runtime=entry-" + $runtimeVersion + "(\s|$)")
@@ -577,7 +603,29 @@ if ($RequireRuntimeChecks -or $RequireRuntimeGuardV3) {
     $runtimeCoverageOK = $protectedFunctions.Count -gt 0 -and $guardedFunctions.Count -eq $protectedFunctions.Count
     Add-Check -Name "runtime-checks.coverage" -Status $(if ($runtimeCoverageOK) { "pass" } else { "fail" }) -Expected "all protected functions" -Actual "$($guardedFunctions.Count)/$($protectedFunctions.Count)"
 
-    if ($runtimeVersion -eq "v3") {
+    if ($runtimeVersion -eq "v4") {
+        $guardV4Marker = if ($null -eq $markers) { $null } else { $markers.runtimeGuardV4 }
+        $guardV4Enabled = $null -ne $guardV4Marker -and [bool]$guardV4Marker.enabled -and [string]$guardV4Marker.metadataSeal -eq "linker-derived-pclntable-v1"
+        Add-Check -Name "runtime-checks.v4.profile" -Status $(if ($guardV4Enabled) { "pass" } else { "fail" }) -Expected "enabled image, platform, and pclntab metadata bindings" -Actual $(if ($guardV4Enabled) { [string]$guardV4Marker.target } else { "missing" })
+        foreach ($markerName in @("sealLo", "sealHi", "bootstrap", "platform", "metadataKey")) {
+            $wordMarker = if ($guardV4Enabled) { $guardV4Marker.$markerName } else { $null }
+            $wordHex = if ($null -ne $wordMarker) { [string]$wordMarker.littleEndian } else { "" }
+            $wordBytes = Convert-HexToBytes -Value $wordHex
+            $wordFormatOK = $null -ne $wordBytes -and $wordBytes.Length -eq 8
+            Add-Check -Name "runtime-checks.v4.$markerName.profile" -Status $(if ($wordFormatOK) { "pass" } else { "fail" }) -Expected "64-bit marker" -Actual $(if ($wordFormatOK) { $wordHex } else { "missing" })
+            if ($wordFormatOK) {
+                $imageCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $wordBytes
+                $recordedCount = -1
+                try {
+                    $recordedCount = [int]$wordMarker.count
+                } catch {
+                    $recordedCount = -1
+                }
+                $wordOK = $imageCount -gt 0 -and $recordedCount -eq $imageCount
+                Add-Check -Name "runtime-checks.v4.$markerName.marker" -Status $(if ($wordOK) { "pass" } else { "fail" }) -Expected "recorded non-zero count" -Actual "$imageCount/$recordedCount"
+            }
+        }
+    } elseif ($runtimeVersion -eq "v3") {
         $guardV3Marker = if ($null -eq $markers) { $null } else { $markers.runtimeGuardV3 }
         $guardV3Enabled = $null -ne $guardV3Marker -and [bool]$guardV3Marker.enabled
         Add-Check -Name "runtime-checks.v3.profile" -Status $(if ($guardV3Enabled) { "pass" } else { "fail" }) -Expected "enabled image and platform bindings" -Actual $(if ($guardV3Enabled) { [string]$guardV3Marker.target } else { "missing" })
@@ -636,6 +684,15 @@ if ($RequireStringV5) {
         ([string]$_.applied) -match '(^|\s)encrypt=str-runtime-v5-lease(\s|$)'
     })
     Add-Check -Name "string-v5.coverage" -Status $(if ($leaseStreamFunctions.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $leaseStreamFunctions.Count
+}
+
+if ($RequireStringV6) {
+    $stringRuntime = if ($null -eq $protection) { "" } else { [string]$protection.stringRuntime }
+    Add-Check -Name "string-v6.profile" -Status $(if ($stringRuntime -match '(^|\+)v6-ticket($|\+)') { "pass" } else { "fail" }) -Expected "v6-ticket" -Actual $stringRuntime
+    $ticketStreamFunctions = @($protectedFunctions | Where-Object {
+        ([string]$_.applied) -match '(^|\s)encrypt=str-runtime-v6-ticket(\s|$)'
+    })
+    Add-Check -Name "string-v6.coverage" -Status $(if ($ticketStreamFunctions.Count -gt 0) { "pass" } else { "fail" }) -Expected ">=1 protected function" -Actual $ticketStreamFunctions.Count
 }
 
 $nameMode = if ($null -eq $protection) { "" } else { [string]$protection.names }
@@ -730,16 +787,72 @@ if ($uniqueScanValues.Count -eq 0) {
 } else {
     foreach ($literal in $uniqueScanValues) {
         $literalString = [string]$literal
-        $literalBytes = [System.Text.Encoding]::UTF8.GetBytes($literalString)
-        $offset = Find-ByteSequence -Data $artifactBytes -Needle $literalBytes
-        Add-Check -Name ("plaintext.absent/" + (Get-Sha256Text -Value $literalString).Substring(0, 16)) -Status $(if ($offset -lt 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $offset
+        foreach ($candidate in @(Get-ResidualScanCandidates -Value $literalString)) {
+            $offset = Find-ByteSequence -Data $artifactBytes -Needle $candidate.bytes
+            $nameHash = (Get-Sha256Text -Value $candidate.value).Substring(0, 16)
+            Add-Check -Name ("plaintext.absent/" + $nameHash + "/" + $candidate.encoding + "/" + $candidate.variant) -Status $(if ($offset -lt 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $offset
+        }
     }
 }
 foreach ($metadataLiteral in @($metadataValues | Where-Object { -not [string]::IsNullOrEmpty([string]$_) } | Select-Object -Unique)) {
     $metadataString = [string]$metadataLiteral
-    $metadataBytes = [System.Text.Encoding]::UTF8.GetBytes($metadataString)
-    $metadataOffset = Find-ByteSequence -Data $artifactBytes -Needle $metadataBytes
-    Add-Check -Name ("metadata.absent/" + (Get-Sha256Text -Value $metadataString).Substring(0, 16)) -Status $(if ($metadataOffset -lt 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $metadataOffset
+    foreach ($candidate in @(Get-ResidualScanCandidates -Value $metadataString)) {
+        $metadataOffset = Find-ByteSequence -Data $artifactBytes -Needle $candidate.bytes
+        $nameHash = (Get-Sha256Text -Value $candidate.value).Substring(0, 16)
+        Add-Check -Name ("metadata.absent/" + $nameHash + "/" + $candidate.encoding + "/" + $candidate.variant) -Status $(if ($metadataOffset -lt 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $metadataOffset
+    }
+}
+
+$residualRecords = @()
+if ($null -ne $profileObject.residualScans) {
+    $residualRecords = @($profileObject.residualScans)
+}
+$derivedProtectedCandidates = @()
+$derivedProtectedSeen = @{}
+foreach ($function in $hashedFunctions) {
+    $functionName = [string]$function.name
+    foreach ($suffix in @("", ".deferwrap", ".gowrap", ".func")) {
+        foreach ($candidate in @(Get-ResidualScanCandidates -Value ($functionName + $suffix))) {
+            $candidateHash = Get-Sha256Text -Value $candidate.value
+            $candidateKey = $candidateHash + [char]0 + $candidate.encoding + [char]0 + $candidate.variant
+            if ($derivedProtectedSeen.ContainsKey($candidateKey)) {
+                continue
+            }
+            $derivedProtectedSeen[$candidateKey] = $true
+            $derivedProtectedCandidates += [pscustomobject]@{
+                sha256 = $candidateHash
+                encoding = $candidate.encoding
+                variant = $candidate.variant
+                bytes = $candidate.bytes
+            }
+        }
+    }
+}
+foreach ($candidate in $derivedProtectedCandidates) {
+    $count = Find-ByteSequenceCount -Data $artifactBytes -Needle $candidate.bytes
+    Add-Check -Name ("residual.protected-name/" + $candidate.sha256.Substring(0, 16) + "/" + $candidate.encoding + "/" + $candidate.variant) -Status $(if ($count -eq 0) { "pass" } else { "fail" }) -Expected "absent" -Actual $count
+}
+
+if ($RequireResidualScan) {
+    $wellFormedRecords = @($residualRecords | Where-Object {
+        $count = -1
+        try { $count = [int]$_.count } catch { $count = -1 }
+        $_.kind -and $_.source -and ([string]$_.sha256 -match '^[0-9a-fA-F]{64}$') -and
+        ([string]$_.encoding -in @("utf-8", "utf-16le")) -and $_.variant -and
+        $count -eq 0 -and -not [bool]$_.present
+    })
+    $recordShapeOK = $residualRecords.Count -gt 0 -and $wellFormedRecords.Count -eq $residualRecords.Count
+    Add-Check -Name "residual-scans.profile" -Status $(if ($recordShapeOK) { "pass" } else { "fail" }) -Expected "digest-only zero-match UTF-8/UTF-16LE records" -Actual "$($wellFormedRecords.Count)/$($residualRecords.Count)"
+    foreach ($candidate in $derivedProtectedCandidates) {
+        $matchingRecords = @($residualRecords | Where-Object {
+            [string]$_.kind -eq "protected-name" -and
+            [string]$_.sha256 -eq $candidate.sha256 -and
+            [string]$_.encoding -eq $candidate.encoding -and
+            [string]$_.variant -eq $candidate.variant -and
+            [int]$_.count -eq 0 -and -not [bool]$_.present
+        })
+        Add-Check -Name ("residual-scans.protected-name/" + $candidate.sha256.Substring(0, 16) + "/" + $candidate.encoding + "/" + $candidate.variant) -Status $(if ($matchingRecords.Count -gt 0) { "pass" } else { "fail" }) -Expected "compiler-derived zero-match record" -Actual $matchingRecords.Count
+    }
 }
 
 if ($null -ne $manifestObject) {

@@ -465,6 +465,7 @@ const (
 	ProtectEphemeral
 	ProtectStream
 	ProtectStreamV5
+	ProtectStreamV6
 )
 
 var BlankNode *Name

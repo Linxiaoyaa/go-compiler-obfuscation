@@ -16,11 +16,20 @@ func TestIsObfuscatedProtectedFuncName(t *testing.T) {
 	}{
 		{"obf.fn.0123456789abcdef0123456789abcdef", true},
 		{"obf.fn.abcdefabcdefabcdefabcdefabcdefab", true},
+		{"obf.fn.0123456789abcdef0123456789abcdef-tramp0", true},
+		{"obf.fn.0123456789abcdef0123456789abcdef-tramp17", true},
+		{"obf.fn.0123456789abcdef0123456789abcdef+10-tramp2", true},
+		{"obf.fn.0123456789abcdef0123456789abcdef-1f-tramp3", true},
 		{"main.privateWorker", false},
 		{"obf.fn.0123456789abcdef", false},
 		{"obf.fn.0123456789abcdef0123456789abcdef00", false},
 		{"obf.fn.0123456789ABCDEF0123456789ABCDEF", false},
 		{"obf.fn.0123456789abcdef0123456789abcdeg", false},
+		{"obf.fn.0123456789abcdef0123456789abcdef-tramp", false},
+		{"obf.fn.0123456789abcdef0123456789abcdef-trampx", false},
+		{"obf.fn.0123456789abcdef0123456789abcdef+10-tramp", false},
+		{"obf.fn.0123456789abcdef0123456789abcdef+1G-tramp0", false},
+		{"obf.fn.0123456789abcdef0123456789abcdef-tramp0-extra", false},
 	}
 	for _, test := range tests {
 		if got := isObfuscatedProtectedFuncName(test.name); got != test.want {
@@ -102,6 +111,29 @@ func TestObfRuntimeGuardV3SealWords(t *testing.T) {
 		order.PutUint32(encoded[4:], second)
 		if got := order.Uint64(encoded[:]); got != seal {
 			t.Fatalf("%T v3 seal serialization = %#x; want %#x", order, got, seal)
+		}
+	}
+}
+
+func TestObfRuntimeGuardV4MetadataSeal(t *testing.T) {
+	const (
+		metadataKey = uint64(0x243f6a8885a308d3)
+		nfunc       = uint64(173)
+		nfiles      = uint64(29)
+		pclntable   = uint64(16384)
+	)
+	base := obfRuntimeGuardV4MetadataSealFor(metadataKey, nfunc, nfiles, pclntable)
+	if base == 0 || base == obfRuntimeGuardV4Unpatched {
+		t.Fatalf("invalid v4 metadata seal %#x", base)
+	}
+	for _, candidate := range [][4]uint64{
+		{metadataKey ^ 1, nfunc, nfiles, pclntable},
+		{metadataKey, nfunc + 1, nfiles, pclntable},
+		{metadataKey, nfunc, nfiles + 1, pclntable},
+		{metadataKey, nfunc, nfiles, pclntable + 8},
+	} {
+		if got := obfRuntimeGuardV4MetadataSealFor(candidate[0], candidate[1], candidate[2], candidate[3]); got == base {
+			t.Fatalf("v4 metadata seal did not bind %#v", candidate)
 		}
 	}
 }

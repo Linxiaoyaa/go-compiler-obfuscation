@@ -192,6 +192,71 @@ function Find-ByteSequenceCount {
     return $count
 }
 
+function Get-ResidualScanCandidates {
+    param([string]$Value)
+
+    $forms = @(
+        [pscustomobject]@{ variant = "raw"; value = $Value },
+        [pscustomobject]@{ variant = "slash-forward"; value = $Value.Replace('\', '/') },
+        [pscustomobject]@{ variant = "slash-backward"; value = $Value.Replace('/', '\') }
+    )
+
+    $seenCandidates = @{}
+    foreach ($form in $forms) {
+        foreach ($encoding in @(
+            [pscustomobject]@{ name = "utf-8"; codec = [System.Text.Encoding]::UTF8 },
+            [pscustomobject]@{ name = "utf-16le"; codec = [System.Text.Encoding]::Unicode }
+        )) {
+            $bytes = $encoding.codec.GetBytes([string]$form.value)
+            $key = $encoding.name + [char]0 + $form.variant + [char]0 + [Convert]::ToBase64String($bytes)
+            if ($seenCandidates.ContainsKey($key)) {
+                continue
+            }
+            $seenCandidates[$key] = $true
+            [pscustomobject]@{
+                encoding = $encoding.name
+                variant = $form.variant
+                value = [string]$form.value
+                bytes = $bytes
+            }
+        }
+    }
+}
+
+function Invoke-ResidualScan {
+    param(
+        [byte[]]$Data,
+        [object[]]$Values,
+        [string]$Kind
+    )
+
+    $records = @()
+    foreach ($entry in @($Values)) {
+        $value = if ($entry -is [string]) { [string]$entry } else { [string]$entry.value }
+        if ([string]::IsNullOrEmpty($value)) {
+            continue
+        }
+        $source = if ($entry -is [string]) { "explicit" } elseif ($entry.source) { [string]$entry.source } else { "explicit" }
+        foreach ($candidate in @(Get-ResidualScanCandidates -Value $value)) {
+            $count = Find-ByteSequenceCount -Data $Data -Needle $candidate.bytes
+            $records += [pscustomobject]@{
+                kind = $Kind
+                source = $source
+                sha256 = Get-Sha256Text -Value $candidate.value
+                length = $candidate.bytes.Length
+                encoding = $candidate.encoding
+                variant = $candidate.variant
+                count = $count
+                present = ($count -gt 0)
+            }
+            if ($count -gt 0) {
+                throw "Residual $Kind scan matched ($($candidate.encoding)/$($candidate.variant), source=$source, sha256=$((Get-Sha256Text -Value $candidate.value)))"
+            }
+        }
+    }
+    return @($records)
+}
+
 function Get-Sha256Text {
     param([string]$Value)
 
@@ -306,12 +371,32 @@ function Parse-ObfReportLine {
     if (-not $match.Success) {
         return $null
     }
-    return [pscustomobject]@{
-        function = Convert-GoQuotedString $match.Groups['function'].Value
-        requested = Convert-GoQuotedString $match.Groups['requested'].Value
-        applied = Convert-GoQuotedString $match.Groups['applied'].Value
+    $functionField = [string]($match.Groups['function'].Value)
+    $requestedField = [string]($match.Groups['requested'].Value)
+    $appliedField = [string]($match.Groups['applied'].Value)
+    $record = [pscustomobject][ordered]@{
+        function = (Convert-GoQuotedString -Value $functionField)
+        requested = (Convert-GoQuotedString -Value $requestedField)
+        applied = (Convert-GoQuotedString -Value $appliedField)
         raw = $Line
     }
+    Write-Output -NoEnumerate $record
+}
+
+function Get-ObfReportField {
+    param(
+        [object]$Report,
+        [string]$Name
+    )
+
+    if ($null -eq $Report) {
+        return ""
+    }
+    $property = $Report.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return ""
+    }
+    return [string]$property.Value
 }
 
 function Get-ObfEntryKey {
@@ -366,6 +451,28 @@ function Get-ObfRuntimeGuardV2Seal {
 }
 
 function Get-ObfRuntimeGuardV3Word {
+    param(
+        [string]$Domain,
+        [string]$Value,
+        [string]$Target
+    )
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $input = $Domain + [char]0 + $Value + [char]0 + $Target
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($input))
+    } finally {
+        $sha.Dispose()
+    }
+    $word = [uint64][BitConverter]::ToUInt64($digest, 0)
+    $unpatched = [Convert]::ToUInt64("a5a5a5a5a5a5a5a5", 16)
+    if ($word -eq 0 -or $word -eq $unpatched) {
+        $word = [Convert]::ToUInt64("6a09e667f3bcc909", 16)
+    }
+    return $word
+}
+
+function Get-ObfRuntimeGuardV4Word {
     param(
         [string]$Domain,
         [string]$Value,
@@ -561,7 +668,7 @@ try {
     # fields. Diagnostic builds that retain either raw field intentionally do
     # not receive a guard unless they restore the normal protected layout.
     $runtimeChecksEnabled = -not $NoRuntimeChecks -and -not $NoObfuscateEntryOff -and -not $NoObfuscateMagic
-    $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=3" } else { "" }
+    $runtimeCheckFlag = if ($runtimeChecksEnabled) { ",obfruntimecheck=4" } else { "" }
     if ($VMBudget -lt 256) {
         throw "VMBudget must be at least 256"
     }
@@ -580,13 +687,14 @@ try {
     $magic = $null
     $runtimeGuardTargetValues = @(& $go env GOOS GOARCH 2>$null)
     if ($runtimeGuardTargetValues.Count -lt 2) {
-        throw "could not resolve target tuple for Runtime Guard v3"
+        throw "could not resolve target tuple for Runtime Guard v4"
     }
     $runtimeGuardTarget = (([string]$runtimeGuardTargetValues[0]).Trim() + "/" + ([string]$runtimeGuardTargetValues[1]).Trim())
-    $runtimeGuardV3SealLo = $null
-    $runtimeGuardV3SealHi = $null
-    $runtimeGuardV3Bootstrap = $null
-    $runtimeGuardV3Platform = $null
+    $runtimeGuardV4SealLo = $null
+    $runtimeGuardV4SealHi = $null
+    $runtimeGuardV4Bootstrap = $null
+    $runtimeGuardV4Platform = $null
+    $runtimeGuardV4MetadataKey = $null
     $layoutSeed = $null
     $fileNameKey = $null
     $ldflags = @()
@@ -612,16 +720,18 @@ try {
         $ldflags += @("-obfmagic", "-obfmagicvalue=$magic")
     }
     if ($runtimeChecksEnabled) {
-        $runtimeGuardV3SealLo = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-lo" -Value $Seed -Target $runtimeGuardTarget
-        $runtimeGuardV3SealHi = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/image-hi" -Value $Seed -Target $runtimeGuardTarget
-        $runtimeGuardV3Bootstrap = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/bootstrap" -Value $Seed -Target $runtimeGuardTarget
-        $runtimeGuardV3Platform = Get-ObfRuntimeGuardV3Word -Domain "go-obf-runtime-guard-v3/platform" -Value "" -Target $runtimeGuardTarget
+        $runtimeGuardV4SealLo = Get-ObfRuntimeGuardV4Word -Domain "go-obf-runtime-guard-v4/image-lo" -Value $Seed -Target $runtimeGuardTarget
+        $runtimeGuardV4SealHi = Get-ObfRuntimeGuardV4Word -Domain "go-obf-runtime-guard-v4/image-hi" -Value $Seed -Target $runtimeGuardTarget
+        $runtimeGuardV4Bootstrap = Get-ObfRuntimeGuardV4Word -Domain "go-obf-runtime-guard-v4/bootstrap" -Value $Seed -Target $runtimeGuardTarget
+        $runtimeGuardV4Platform = Get-ObfRuntimeGuardV4Word -Domain "go-obf-runtime-guard-v4/platform" -Value "" -Target $runtimeGuardTarget
+        $runtimeGuardV4MetadataKey = Get-ObfRuntimeGuardV4Word -Domain "go-obf-runtime-guard-v4/metadata-key" -Value $Seed -Target $runtimeGuardTarget
         $ldflags += @(
-            "-obfguardv3",
-            "-obfguardv3seallo=$runtimeGuardV3SealLo",
-            "-obfguardv3sealhi=$runtimeGuardV3SealHi",
-            "-obfguardv3bootstrap=$runtimeGuardV3Bootstrap",
-            "-obfguardv3platform=$runtimeGuardV3Platform"
+            "-obfguardv4",
+            "-obfguardv4seallo=$runtimeGuardV4SealLo",
+            "-obfguardv4sealhi=$runtimeGuardV4SealHi",
+            "-obfguardv4bootstrap=$runtimeGuardV4Bootstrap",
+            "-obfguardv4platform=$runtimeGuardV4Platform",
+            "-obfguardv4metadatakey=$runtimeGuardV4MetadataKey"
         )
     }
     if (-not $NoRandomizeLayout) {
@@ -649,7 +759,7 @@ try {
     $nameMode = if ($NoObfuscateNames) { "stable" } elseif ($KeepPclnNames) { "hashed-protected" } else { "hidden-protected" }
     Write-Host "names:    $nameMode"
     Write-Host "pclntab:  $(if ($NoObfuscateMagic) { 'standard-magic' } else { 'seed-magic' })"
-    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v3' } else { 'disabled' })"
+    Write-Host "runtime:  $(if ($runtimeChecksEnabled) { 'entry-integrity-v4' } else { 'disabled' })"
     Write-Host "layout:   $(if ($NoRandomizeLayout) { 'stable' } else { 'seed-randomized' })"
     Write-Host "files:    $(if ($NoObfuscateFileNames) { 'original' } else { 'hashed-pclntab' })"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -681,7 +791,7 @@ try {
     }
 
     $artifactBytes = $null
-    if ($Report -or $ScanPlaintext.Count -gt 0 -or $ScanMetadata.Count -gt 0 -or -not $NoDefaultMetadataScan) {
+    if ($Report -or $ScanPlaintext.Count -gt 0 -or $ScanMetadata.Count -gt 0 -or -not $NoDefaultMetadataScan -or $obfReports.Count -gt 0) {
         $artifactBytes = [System.IO.File]::ReadAllBytes($temporaryOut)
     }
     $scanResults = @()
@@ -690,44 +800,55 @@ try {
             if ([string]::IsNullOrEmpty($literal)) {
                 throw "ScanPlaintext entries must be non-empty"
             }
-            $needle = [System.Text.Encoding]::UTF8.GetBytes($literal)
-            $offset = Find-ByteSequence -Data $artifactBytes -Needle $needle
-            $scanResults += [pscustomobject]@{
-                sha256 = Get-Sha256Text -Value $literal
-                length = $needle.Length
-                encoding = "utf-8"
-                present = ($offset -ge 0)
-                offset = $offset
-            }
-            if ($offset -ge 0) {
-                throw "Plaintext scan matched at file offset $offset"
-            }
         }
+        $scanResults = @(Invoke-ResidualScan -Data $artifactBytes -Values @($ScanPlaintext) -Kind "plaintext")
         Write-Host "scan:     $($ScanPlaintext.Count) plaintext value(s) absent"
     }
     $defaultMetadataValues = @()
     if (-not $NoDefaultMetadataScan) {
         $defaultMetadataValues = @($Seed, $root, ([string](Get-Location).Path))
     }
-    $metadataScanValues = @(@($defaultMetadataValues) + @($ScanMetadata) | Where-Object { -not [string]::IsNullOrEmpty([string]$_) } | Select-Object -Unique)
-    $metadataScanResults = @()
-    foreach ($metadataValue in $metadataScanValues) {
+    $metadataInputs = @()
+    $metadataSeen = @{}
+    foreach ($metadataValue in @($defaultMetadataValues)) {
         $metadataString = [string]$metadataValue
-        $needle = [System.Text.Encoding]::UTF8.GetBytes($metadataString)
-        $offset = Find-ByteSequence -Data $artifactBytes -Needle $needle
-        $metadataScanResults += [pscustomobject]@{
-            sha256 = Get-Sha256Text -Value $metadataString
-            length = $needle.Length
-            encoding = "utf-8"
-            present = ($offset -ge 0)
-            offset = $offset
+        if ([string]::IsNullOrEmpty($metadataString) -or $metadataSeen.ContainsKey($metadataString)) {
+            continue
         }
-        if ($offset -ge 0) {
-            throw "Metadata scan matched at file offset $offset"
+        $metadataSeen[$metadataString] = $true
+        $metadataInputs += [pscustomobject]@{ value = $metadataString; source = "default-metadata" }
+    }
+    foreach ($metadataValue in @($ScanMetadata)) {
+        $metadataString = [string]$metadataValue
+        if ([string]::IsNullOrEmpty($metadataString) -or $metadataSeen.ContainsKey($metadataString)) {
+            continue
+        }
+        $metadataSeen[$metadataString] = $true
+        $metadataInputs += [pscustomobject]@{ value = $metadataString; source = "explicit-metadata" }
+    }
+    $metadataScanResults = @(Invoke-ResidualScan -Data $artifactBytes -Values $metadataInputs -Kind "metadata")
+
+    $protectedNameInputs = @()
+    $protectedNameSeen = @{}
+    foreach ($obfReport in @($obfReports)) {
+        $appliedReportModes = Get-ObfReportField -Report $obfReport -Name "applied"
+        if ($appliedReportModes -notmatch '(^|\s)name=hash-v1(\s|$)') {
+            continue
+        }
+        $functionName = Get-ObfReportField -Report $obfReport -Name "function"
+        foreach ($suffix in @("", ".deferwrap", ".gowrap", ".func")) {
+            $candidateName = $functionName + $suffix
+            if ([string]::IsNullOrEmpty($candidateName) -or $protectedNameSeen.ContainsKey($candidateName)) {
+                continue
+            }
+            $protectedNameSeen[$candidateName] = $true
+            $protectedNameInputs += [pscustomobject]@{ value = $candidateName; source = "compiler-derived-hash-v1" }
         }
     }
-    if ($metadataScanValues.Count -gt 0) {
-        Write-Host "metadata: $($metadataScanValues.Count) residual value(s) absent"
+    $protectedNameScanResults = @(Invoke-ResidualScan -Data $artifactBytes -Values $protectedNameInputs -Kind "protected-name")
+    $residualScanResults = @($scanResults + $metadataScanResults + $protectedNameScanResults)
+    if ($metadataInputs.Count -gt 0 -or $protectedNameInputs.Count -gt 0) {
+        Write-Host "metadata: $($metadataInputs.Count) configured and $($protectedNameInputs.Count) compiler-derived residual value(s) absent"
     }
 
     $temporaryArtifact = Get-Item -LiteralPath $temporaryOut
@@ -776,24 +897,25 @@ try {
             $entryKeyBytesForProfile = Convert-BytesToHex -Value $entryKeyBytes
             $entryKeyCount = Find-ByteSequenceCount -Data $artifactBytes -Needle $entryKeyBytes
         }
-        $runtimeGuardV3Marker = $null
+        $runtimeGuardV4Marker = $null
         if ($runtimeChecksEnabled) {
-            $runtimeGuardV3Words = [ordered]@{
-                sealLo = [uint64]$runtimeGuardV3SealLo
-                sealHi = [uint64]$runtimeGuardV3SealHi
-                bootstrap = [uint64]$runtimeGuardV3Bootstrap
-                platform = [uint64]$runtimeGuardV3Platform
+            $runtimeGuardV4Words = [ordered]@{
+                sealLo = [uint64]$runtimeGuardV4SealLo
+                sealHi = [uint64]$runtimeGuardV4SealHi
+                bootstrap = [uint64]$runtimeGuardV4Bootstrap
+                platform = [uint64]$runtimeGuardV4Platform
+                metadataKey = [uint64]$runtimeGuardV4MetadataKey
             }
-            $runtimeGuardV3Marker = [ordered]@{ enabled = $true; target = $runtimeGuardTarget }
-            foreach ($name in $runtimeGuardV3Words.Keys) {
-                $wordBytes = Get-LittleEndianBytes -Value $runtimeGuardV3Words[$name] -Width 8
-                $runtimeGuardV3Marker[$name] = [ordered]@{
+            $runtimeGuardV4Marker = [ordered]@{ enabled = $true; target = $runtimeGuardTarget; metadataSeal = "linker-derived-pclntable-v1" }
+            foreach ($name in $runtimeGuardV4Words.Keys) {
+                $wordBytes = Get-LittleEndianBytes -Value $runtimeGuardV4Words[$name] -Width 8
+                $runtimeGuardV4Marker[$name] = [ordered]@{
                     littleEndian = Convert-BytesToHex -Value $wordBytes
                     count = Find-ByteSequenceCount -Data $artifactBytes -Needle $wordBytes
                 }
             }
         } else {
-            $runtimeGuardV3Marker = [ordered]@{ enabled = $false; target = "" }
+            $runtimeGuardV4Marker = [ordered]@{ enabled = $false; target = ""; metadataSeal = "" }
         }
         $driverVersion = ""
         try {
@@ -886,10 +1008,10 @@ try {
                 pclntabMagic = $magicKind
                 functionLayout = if ($NoRandomizeLayout) { "stable" } else { "seed-randomized" }
                 fileNames = if ($NoObfuscateFileNames) { "original" } else { "hashed-pclntab" }
-                stringRuntime = "v2+v3-ephemeral+v4-stream+v5-lease"
+                stringRuntime = "v2+v3-ephemeral+v4-stream+v5-lease+v6-ticket"
                 vm = "v4-budgeted"
-                nativeCFG = [ordered]@{ version = "v2"; budget = $NativeBudget; ssaCheck = [bool]$SSACheck }
-                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v3" } else { "disabled" }
+                nativeCFG = [ordered]@{ version = "v3"; budget = $NativeBudget; ssaCheck = [bool]$SSACheck }
+                runtimeChecks = if ($runtimeChecksEnabled) { "entry-v4" } else { "disabled" }
             }
             artifact = [ordered]@{
                 path = $outPath
@@ -902,13 +1024,14 @@ try {
             }
             plaintextScans = @($scanResults)
             metadataScans = @($metadataScanResults)
+            residualScans = @($residualScanResults)
             obfReport = [ordered]@{
                 count = @($obfReports).Count
                 functions = @($obfReports | ForEach-Object {
                     [ordered]@{
-                        name = $_.function
-                        requested = $_.requested
-                        applied = $_.applied
+                        name = Get-ObfReportField -Report $_ -Name "function"
+                        requested = Get-ObfReportField -Report $_ -Name "requested"
+                        applied = Get-ObfReportField -Report $_ -Name "applied"
                     }
                 })
             }
@@ -928,7 +1051,7 @@ try {
                     littleEndian = $entryKeyBytesForProfile
                     count = $entryKeyCount
                 }
-                runtimeGuardV3 = $runtimeGuardV3Marker
+                runtimeGuardV4 = $runtimeGuardV4Marker
             }
         }
         $json = $profile | ConvertTo-Json -Depth 12
@@ -980,7 +1103,7 @@ try {
                     cHeader = $manifestHeaderRecord
                 }
                 protection = [ordered]@{
-                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v3" } else { "disabled" }
+                    runtimeChecks = if ($runtimeChecksEnabled) { "entry-v4" } else { "disabled" }
                 }
             }
             $temporaryManifest = "$manifestPath.tmp.$PID"

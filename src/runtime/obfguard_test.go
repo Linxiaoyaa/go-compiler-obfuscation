@@ -79,3 +79,39 @@ func TestObfRuntimeGuardV3(t *testing.T) {
 		t.Fatal("modified platform binding was accepted")
 	}
 }
+
+func TestObfRuntimeGuardV4(t *testing.T) {
+	const (
+		tag         = uint64(0x2d6f4c1a9b375e04)
+		bootstrap   = uint64(0x7f4a7c159e3779b9)
+		imageLo     = uint64(0x0123456789abcdef)
+		imageHi     = uint64(0xfedcba9876543210)
+		platform    = uint64(0x0f1e2d3c4b5a6978)
+		metadataKey = uint64(0x243f6a8885a308d3)
+		entryKey    = uint32(0x13579bdf)
+		magic       = uint32(0x2468ace1)
+		nfunc       = uint64(173)
+		nfiles      = uint64(29)
+		pclntable   = uint64(16384)
+	)
+	seal := runtime.ObfRuntimeGuardV4SealForTest(tag, entryKey, magic, bootstrap, imageLo, imageHi, platform, metadataKey)
+	metadataSeal := runtime.ObfRuntimeGuardV4MetadataSealForTest(metadataKey, nfunc, nfiles, pclntable)
+	if !runtime.ObfRuntimeGuardV4ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform, metadataKey, metadataSeal, nfunc, nfiles, pclntable) {
+		t.Fatal("valid runtime guard v4 input was rejected")
+	}
+	if runtime.ObfRuntimeGuardV4ValidForTest(tag, seal^1, bootstrap, imageLo, imageHi, platform, metadataKey, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform, metadataKey, metadataSeal, nfunc, nfiles, pclntable) {
+		t.Fatal("modified runtime guard v4 seal was accepted")
+	}
+	if runtime.ObfRuntimeGuardV4ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey^1, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform, metadataKey, metadataSeal, nfunc, nfiles, pclntable) {
+		t.Fatal("modified metadata key was accepted")
+	}
+	if runtime.ObfRuntimeGuardV4ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform, metadataKey, metadataSeal^1, nfunc, nfiles, pclntable) {
+		t.Fatal("modified metadata seal was accepted")
+	}
+	if runtime.ObfRuntimeGuardV4ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform, metadataKey, metadataSeal, nfunc+1, nfiles, pclntable) {
+		t.Fatal("modified function count was accepted")
+	}
+	if runtime.ObfRuntimeGuardV4ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey, entryKey, magic, magic, imageLo, imageHi, bootstrap, platform, metadataKey, metadataSeal, nfunc, nfiles, pclntable+8) {
+		t.Fatal("modified pclntab length was accepted")
+	}
+}

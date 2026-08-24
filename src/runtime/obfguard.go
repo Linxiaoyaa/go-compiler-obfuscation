@@ -170,3 +170,102 @@ func obfRuntimeGuardSealV3(tag uint64, entryKey, magic uint32, bootstrap, imageL
 	x *= 0x94d049bb133111eb
 	return x ^ (x >> 31)
 }
+
+// obfRuntimeGuardV4State records the validated image-and-metadata binding.
+// Every protected entry still recomputes the final pclntab seal before using
+// the state, so cached success cannot mask a later metadata modification.
+var obfRuntimeGuardV4State atomic.Uint64
+
+//go:noinline
+func obfRuntimeGuardV4(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey uint64) {
+	hdr := firstmoduledata.pcHeader
+	if hdr == nil || !obfRuntimeGuardV4ModuleReady(hdr) ||
+		!obfRuntimeGuardValidV4(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey,
+			obfEntryOffKey, obfPclnMagic, hdr.magic,
+			obfRuntimeGuardV4Seal[0], obfRuntimeGuardV4Seal[1],
+			obfRuntimeGuardV4Bootstrap, obfRuntimeGuardV4Platform,
+			obfRuntimeGuardV4MetadataKey, obfRuntimeGuardV4MetadataSeal,
+			uint64(hdr.nfunc), uint64(hdr.nfiles), uint64(len(firstmoduledata.pclntable))) {
+		throw("protected runtime integrity check failed")
+	}
+	metadataSeal := obfRuntimeGuardV4MetadataSealFor(metadataKey, uint64(hdr.nfunc), uint64(hdr.nfiles), uint64(len(firstmoduledata.pclntable)))
+	stamp := obfRuntimeGuardV4Stamp(bootstrap, imageLo, imageHi, platform, metadataKey, metadataSeal)
+	state := obfRuntimeGuardV4State.Load()
+	if state == 0 {
+		if !obfRuntimeGuardV4State.CompareAndSwap(0, stamp) && obfRuntimeGuardV4State.Load() != stamp {
+			throw("protected runtime integrity check failed")
+		}
+	} else if state != stamp {
+		throw("protected runtime integrity check failed")
+	}
+	// Re-read both the static lanes and the dynamic pclntab-derived seal after
+	// publishing state. The second calculation binds this fast path to live
+	// module metadata rather than the first successful call alone.
+	if obfRuntimeGuardV4State.Load() != stamp ||
+		obfRuntimeGuardV4Seal[0] != imageLo || obfRuntimeGuardV4Seal[1] != imageHi ||
+		obfRuntimeGuardV4Bootstrap != bootstrap || obfRuntimeGuardV4Platform != platform ||
+		obfRuntimeGuardV4MetadataKey != metadataKey || obfRuntimeGuardV4MetadataSeal != metadataSeal ||
+		obfRuntimeGuardV4MetadataSealFor(metadataKey, uint64(hdr.nfunc), uint64(hdr.nfiles), uint64(len(firstmoduledata.pclntable))) != metadataSeal {
+		throw("protected runtime integrity check failed")
+	}
+}
+
+func obfRuntimeGuardV4ModuleReady(hdr *pcHeader) bool {
+	return obfRuntimeGuardV3ModuleReady(hdr) && len(firstmoduledata.pclntable) > 0
+}
+
+func obfRuntimeGuardV4Stamp(bootstrap, imageLo, imageHi, platform, metadataKey, metadataSeal uint64) uint64 {
+	x := bootstrap ^ imageLo ^ bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31)
+	x ^= bits.RotateLeft64(metadataKey, 43) ^ bits.RotateLeft64(metadataSeal, 7)
+	x ^= 0x3bd39e10cb0ef593
+	x ^= x >> 29
+	x *= 0x9e3779b97f4a7c15
+	x ^= x >> 32
+	if x == 0 {
+		return 0x6a09e667f3bcc909
+	}
+	return x
+}
+
+func obfRuntimeGuardValidV4(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey uint64, entryKey uint32, magic, headerMagic abi.PCLnTabMagic, patchedLo, patchedHi, patchedBootstrap, patchedPlatform, patchedMetadataKey, patchedMetadataSeal, nfunc, nfiles, pclntableSize uint64) bool {
+	if bootstrap == 0 || bootstrap == obfRuntimeGuardV4Unpatched ||
+		imageLo == 0 || imageHi == 0 || platform == 0 || metadataKey == 0 ||
+		patchedLo != imageLo || patchedHi != imageHi ||
+		patchedBootstrap != bootstrap || patchedPlatform != platform || patchedMetadataKey != metadataKey {
+		return false
+	}
+	if patchedMetadataSeal != obfRuntimeGuardV4MetadataSealFor(metadataKey, nfunc, nfiles, pclntableSize) {
+		return false
+	}
+	if entryKey == obfEntryOffDisabled || magic == obfPclnMagicUnpatched || headerMagic != magic {
+		return false
+	}
+	return obfRuntimeGuardSealV4(tag, entryKey, uint32(magic), bootstrap, imageLo, imageHi, platform, metadataKey) == seal
+}
+
+func obfRuntimeGuardSealV4(tag uint64, entryKey, magic uint32, bootstrap, imageLo, imageHi, platform, metadataKey uint64) uint64 {
+	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap ^ imageLo ^ metadataKey
+	x ^= bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31) ^ bits.RotateLeft64(metadataKey, 43)
+	x ^= 0x452821e638d01377
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+func obfRuntimeGuardV4MetadataSealFor(metadataKey, nfunc, nfiles, pclntableSize uint64) uint64 {
+	x := metadataKey ^ nfunc*0x9e3779b185ebca87
+	x ^= bits.RotateLeft64(nfiles*0xd6e8feb86659fd93, 19)
+	x ^= bits.RotateLeft64(pclntableSize^0xa4093822299f31d0, 37)
+	x ^= 0x1f83d9abfb41bd6b
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	if x == 0 || x == obfRuntimeGuardV4Unpatched {
+		return 0x510e527fade682d1
+	}
+	return x
+}

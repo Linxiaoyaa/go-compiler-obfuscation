@@ -35,8 +35,15 @@ func leaseStreamCheck(last int) bool {
 	return len(s) == 21 && s[0] == 'v' && s[3] == 'l' && s[last] == 'k'
 }
 
+//go:encrypt
+//go:streamv6
+func ticketStreamCheck(last int) bool {
+	s := "v6-ticket-stream-check"
+	return len(s) == 22 && s[0] == 'v' && s[3] == 't' && s[last] == 'k'
+}
+
 func main() {
-	if !secretCheck() || !streamCheck(19) || !leaseStreamCheck(20) || vmCalc(7, 11) == 0 {
+	if !secretCheck() || !streamCheck(19) || !leaseStreamCheck(20) || !ticketStreamCheck(21) || vmCalc(7, 11) == 0 {
 		panic("v38 matrix failure")
 	}
 }

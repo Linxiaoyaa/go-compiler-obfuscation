@@ -106,6 +106,29 @@ func ObfStringDataV5ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64, l
 	return result
 }
 
+// ObfStringDataV6ForTest returns individual ticket-bound String v6 byte
+// decodes. Production lowering keeps the bytes separate and never joins them
+// into a plaintext string.
+func ObfStringDataV6ForTest(decoder uint8, ciphertext []byte, lanes [4]uint64, lease, ticket uint64) []byte {
+	if len(ciphertext) == 0 {
+		return nil
+	}
+	result := make([]byte, len(ciphertext))
+	for i := range result {
+		switch decoder & 3 {
+		case 0:
+			result[i] = obfStringByteV6A(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease, ticket)
+		case 1:
+			result[i] = obfStringByteV6B(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease, ticket)
+		case 2:
+			result[i] = obfStringByteV6C(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease, ticket)
+		default:
+			result[i] = obfStringByteV6D(&ciphertext[0], len(ciphertext), i, lanes[0], lanes[1], lanes[2], lanes[3], lease, ticket)
+		}
+	}
+	return result
+}
+
 // ObfRuntimeGuardSealForTest exposes the deterministic guard seal calculation.
 func ObfRuntimeGuardSealForTest(tag uint64, entryKey, magic uint32) uint64 {
 	return obfRuntimeGuardSealV1(tag, entryKey, magic)
@@ -137,6 +160,23 @@ func ObfRuntimeGuardV3SealForTest(tag uint64, entryKey, magic uint32, bootstrap,
 // production fatal path or changing the package-global state.
 func ObfRuntimeGuardV3ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform uint64, entryKey, magic, headerMagic uint32, patchedLo, patchedHi, patchedBootstrap, patchedPlatform uint64) bool {
 	return obfRuntimeGuardValidV3(tag, seal, bootstrap, imageLo, imageHi, platform, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic), patchedLo, patchedHi, patchedBootstrap, patchedPlatform)
+}
+
+// ObfRuntimeGuardV4SealForTest exposes the v4 function seal calculation.
+func ObfRuntimeGuardV4SealForTest(tag uint64, entryKey, magic uint32, bootstrap, imageLo, imageHi, platform, metadataKey uint64) uint64 {
+	return obfRuntimeGuardSealV4(tag, entryKey, magic, bootstrap, imageLo, imageHi, platform, metadataKey)
+}
+
+// ObfRuntimeGuardV4MetadataSealForTest exposes the final pclntab seal
+// calculation used by both cmd/link and the runtime gate.
+func ObfRuntimeGuardV4MetadataSealForTest(metadataKey, nfunc, nfiles, pclntableSize uint64) uint64 {
+	return obfRuntimeGuardV4MetadataSealFor(metadataKey, nfunc, nfiles, pclntableSize)
+}
+
+// ObfRuntimeGuardV4ValidForTest checks v4 guard inputs without entering the
+// production fatal path or changing the package-global state.
+func ObfRuntimeGuardV4ValidForTest(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey uint64, entryKey, magic, headerMagic uint32, patchedLo, patchedHi, patchedBootstrap, patchedPlatform, patchedMetadataKey, patchedMetadataSeal, nfunc, nfiles, pclntableSize uint64) bool {
+	return obfRuntimeGuardValidV4(tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey, entryKey, abi.PCLnTabMagic(magic), abi.PCLnTabMagic(headerMagic), patchedLo, patchedHi, patchedBootstrap, patchedPlatform, patchedMetadataKey, patchedMetadataSeal, nfunc, nfiles, pclntableSize)
 }
 
 var Fadd64 = fadd64

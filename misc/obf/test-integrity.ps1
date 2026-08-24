@@ -90,8 +90,11 @@ function Invoke-Verifier {
         -RequireCompilerSource `
         -RequireTooling `
         -RequireRuntimeChecks `
-        -RequireRuntimeGuardV3 `
+        -RequireRuntimeGuardV4 `
         -RequireStringV4 `
+        -RequireStringV5 `
+        -RequireStringV6 `
+        -RequireResidualScan `
         -MinReportFunctions 2 `
         -MinV4Aliases 1 `
         -ExpectedSeedFingerprint $ExpectedSeedFingerprint `
@@ -181,7 +184,7 @@ Assert-ExpectedFailure -Name "artifact-byte-tamper" -Fixture $artifactCase -Veri
 # This isolates the residual metadata scan from the ordinary artifact digest checks.
 $metadataCase = Copy-Fixture -Directory (Join-Path $OutDir "metadata-tamper") `
     -SourceArtifact $sourceArtifact -SourceProfile $sourceProfile -SourceManifest $sourceManifest
-$metadataBytes = [System.Text.Encoding]::UTF8.GetBytes($rootPath)
+$metadataBytes = [System.Text.Encoding]::Unicode.GetBytes($rootPath)
 $metadataArtifactBytes = [System.IO.File]::ReadAllBytes($metadataCase.artifact)
 $combinedBytes = New-Object byte[] ($metadataArtifactBytes.Length + $metadataBytes.Length)
 [Array]::Copy($metadataArtifactBytes, 0, $combinedBytes, 0, $metadataArtifactBytes.Length)
@@ -268,9 +271,9 @@ Assert-ExpectedFailure -Name "runtime-check-mode-tamper" -Fixture $runtimeCase -
     -ExpectedCheck "runtime-checks.profile"
 
 # Keep the profile and manifest internally consistent while downgrading only
-# the declared version. Release verification must reject v2 even though the
-# compatibility runtime-check switch still accepts historical v2 artifacts.
-$runtimeDowngradeCase = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v3-downgrade") `
+# the declared version. Release verification must reject v3 even though the
+# compatibility runtime-check switch still accepts historical release records.
+$runtimeDowngradeCase = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v4-downgrade") `
     -SourceArtifact $sourceArtifact -SourceProfile $sourceProfile -SourceManifest $sourceManifest
 $runtimeDowngradeProfile = Get-Content -LiteralPath $runtimeDowngradeCase.profile -Raw | ConvertFrom-Json
 $runtimeDowngradeProfile.protection.runtimeChecks = "entry-v2"
@@ -279,24 +282,24 @@ $runtimeDowngradeManifest = Get-Content -LiteralPath $runtimeDowngradeCase.manif
 $runtimeDowngradeManifest.profile.sha256 = Get-FileSha256 -Path $runtimeDowngradeCase.profile
 $runtimeDowngradeManifest.protection.runtimeChecks = "entry-v2"
 Save-Json -Path $runtimeDowngradeCase.manifest -Object $runtimeDowngradeManifest
-Assert-ExpectedFailure -Name "runtime-guard-v3-downgrade" -Fixture $runtimeDowngradeCase -VerifierPath $verifierPath `
+Assert-ExpectedFailure -Name "runtime-guard-v4-downgrade" -Fixture $runtimeDowngradeCase -VerifierPath $verifierPath `
     -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
     -ExpectedCheck "runtime-checks.profile"
 
-# Keep the declared v3 mode but remove the multi-lane image marker. This
-# verifies that a self-consistent release record cannot omit the independent
-# Guard v3 image and platform binding.
-$guardV3Case = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v3-marker-tamper") `
+# Keep the declared v4 mode but remove the multi-lane image and metadata
+# marker. This verifies that a self-consistent release record cannot omit the
+# independent Guard v4 image, platform, and pclntab binding.
+$guardV4Case = Copy-Fixture -Directory (Join-Path $OutDir "runtime-guard-v4-marker-tamper") `
     -SourceArtifact $sourceArtifact -SourceProfile $sourceProfile -SourceManifest $sourceManifest
-$guardV3Profile = Get-Content -LiteralPath $guardV3Case.profile -Raw | ConvertFrom-Json
-$guardV3Profile.markers.runtimeGuardV3.enabled = $false
-Save-Json -Path $guardV3Case.profile -Object $guardV3Profile
-$guardV3Manifest = Get-Content -LiteralPath $guardV3Case.manifest -Raw | ConvertFrom-Json
-$guardV3Manifest.profile.sha256 = Get-FileSha256 -Path $guardV3Case.profile
-Save-Json -Path $guardV3Case.manifest -Object $guardV3Manifest
-Assert-ExpectedFailure -Name "runtime-guard-v3-marker-tamper" -Fixture $guardV3Case -VerifierPath $verifierPath `
+$guardV4Profile = Get-Content -LiteralPath $guardV4Case.profile -Raw | ConvertFrom-Json
+$guardV4Profile.markers.runtimeGuardV4.enabled = $false
+Save-Json -Path $guardV4Case.profile -Object $guardV4Profile
+$guardV4Manifest = Get-Content -LiteralPath $guardV4Case.manifest -Raw | ConvertFrom-Json
+$guardV4Manifest.profile.sha256 = Get-FileSha256 -Path $guardV4Case.profile
+Save-Json -Path $guardV4Case.manifest -Object $guardV4Manifest
+Assert-ExpectedFailure -Name "runtime-guard-v4-marker-tamper" -Fixture $guardV4Case -VerifierPath $verifierPath `
     -Root $rootPath -ToolchainCompiler $compilerPath -ExpectedSeedFingerprint $expectedSeedFingerprint `
-    -ExpectedCheck "runtime-checks.v3.profile"
+    -ExpectedCheck "runtime-checks.v4.profile"
 
 Write-Output "integrity negative suite passed"
 exit 0

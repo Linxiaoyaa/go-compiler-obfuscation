@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral | ir.ProtectStream | ir.ProtectStreamV5
+const protectionPragmas = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize | ir.ProtectEphemeral | ir.ProtectStream | ir.ProtectStreamV5 | ir.ProtectStreamV6
 
 type vmOpcode uint8
 
@@ -138,6 +138,9 @@ func protectionFlagsString(flags ir.ProtectionFlag) string {
 	if flags&ir.ProtectStreamV5 != 0 {
 		names = append(names, "streamv5")
 	}
+	if flags&ir.ProtectStreamV6 != 0 {
+		names = append(names, "streamv6")
+	}
 	if flags&ir.ProtectExclude != 0 {
 		names = append(names, "noprotect")
 	}
@@ -217,7 +220,9 @@ func obfVirtualize(f *Func) {
 	}
 	if runtimeCheck {
 		runtimeMode := "entry-v2"
-		if base.Debug.ObfRuntimeCheck >= 3 {
+		if base.Debug.ObfRuntimeCheck >= 4 {
+			runtimeMode = "entry-v4"
+		} else if base.Debug.ObfRuntimeCheck >= 3 {
 			runtimeMode = "entry-v3"
 		}
 		applied += " runtime=" + runtimeMode
@@ -262,7 +267,9 @@ func obfHarden(f *Func) {
 			}
 		}
 		if stringProtected {
-			if flags&ir.ProtectStreamV5 != 0 {
+			if flags&ir.ProtectStreamV6 != 0 {
+				applied = append(applied, "encrypt=str-runtime-v6-ticket")
+			} else if flags&ir.ProtectStreamV5 != 0 {
 				applied = append(applied, "encrypt=str-runtime-v5-lease")
 			} else if flags&ir.ProtectStream != 0 {
 				applied = append(applied, "encrypt=str-runtime-v4-stream")
@@ -286,7 +293,9 @@ func obfHarden(f *Func) {
 		return
 	} else if runtimeCheck {
 		runtimeMode := "entry-v2"
-		if base.Debug.ObfRuntimeCheck >= 3 {
+		if base.Debug.ObfRuntimeCheck >= 4 {
+			runtimeMode = "entry-v4"
+		} else if base.Debug.ObfRuntimeCheck >= 3 {
 			runtimeMode = "entry-v3"
 		}
 		applied = append(applied, "runtime="+runtimeMode)
@@ -302,6 +311,9 @@ func installRuntimeGuard(f *Func) (bool, error) {
 	if base.Debug.ObfRuntimeCheck == 0 {
 		return false, nil
 	}
+	if base.Debug.ObfRuntimeCheck >= 4 {
+		return installRuntimeGuardV4(f)
+	}
 	if base.Debug.ObfRuntimeCheck >= 3 {
 		return installRuntimeGuardV3(f)
 	}
@@ -314,7 +326,7 @@ func installRuntimeGuard(f *Func) (bool, error) {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV2") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV3")) {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV1") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV2") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV3") || strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV4")) {
 				return false, nil
 			}
 		}
@@ -432,6 +444,73 @@ func installRuntimeGuardV3(f *Func) (bool, error) {
 	return true, nil
 }
 
+// installRuntimeGuardV4 emits the v4 entry gate. Alongside the v3 image lanes
+// it passes a compiler-derived metadata key; cmd/link derives the matching
+// final pclntab seal only after all function metadata has been generated.
+func installRuntimeGuardV4(f *Func) (bool, error) {
+	if base.Debug.ObfSeed == "" {
+		return false, fmt.Errorf("runtime checks require a protection seed")
+	}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != OpStaticCall && v.Op != OpStaticLECall {
+				continue
+			}
+			aux, ok := v.Aux.(*AuxCall)
+			if ok && aux.Fn != nil && strings.Contains(aux.Fn.Name, "runtime.obfRuntimeGuardV4") {
+				return false, nil
+			}
+		}
+	}
+
+	entry := f.Entry
+	var initMem *Value
+	for _, v := range entry.Values {
+		if v.Op == OpInitMem {
+			initMem = v
+			break
+		}
+	}
+	if initMem == nil {
+		return false, fmt.Errorf("could not find entry memory")
+	}
+
+	tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey := base.ObfRuntimeGuardV4Values(base.Debug.ObfSeed, protectionFunctionName(f))
+	rng := newProtectionRNGDomain(f, "runtime-guard-v4")
+	sp := entry.NewValue0(entry.Pos, OpSP, f.Config.Types.Uintptr)
+	source := entry.NewValue2(entry.Pos, OpConvert, f.Config.Types.UInt64, sp, initMem)
+	zero := opaqueZero64(entry, source)
+	values := [...]uint64{tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey}
+	args := make([]*Value, len(values))
+	for i, value := range values {
+		args[i] = runtimeGuardConstant(entry, entry.Pos, value, rng, zero)
+	}
+	argTypes := make([]*types.Type, len(args))
+	for i := range argTypes {
+		argTypes[i] = f.Config.Types.UInt64
+	}
+	aux := StaticAuxCall(f.fe.Syslook("obfRuntimeGuardV4"), f.ABIDefault.ABIAnalyzeTypes(argTypes, nil))
+	call := entry.NewValue0A(entry.Pos, OpStaticCall, types.TypeResultMem, aux)
+	call.AddArgs(args...)
+	call.AddArg(initMem)
+	call.AuxInt = aux.ArgWidth()
+	guardMem := entry.NewValue1I(entry.Pos, OpSelectN, types.TypeMem, 0, call)
+
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v == source || v == call || v == guardMem {
+				continue
+			}
+			for i, arg := range v.Args {
+				if arg == initMem {
+					v.SetArg(i, guardMem)
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
 func runtimeGuardConstant(b *Block, pos src.XPos, value uint64, rng *protectionRNG, zero *Value) *Value {
 	mask := rng.next()
 	if mask == 0 {
@@ -454,7 +533,7 @@ func hasObfuscatedStringCall(f *Func) bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV5")) {
+			if ok && aux.Fn != nil && (strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") || strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV5") || strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV6") || strings.Contains(aux.Fn.Name, "runtime.obfStringByteV6")) {
 				return true
 			}
 		}
@@ -473,7 +552,7 @@ func obfuscatedStringKeyConstants(f *Func) map[*Value]bool {
 				continue
 			}
 			aux, ok := v.Aux.(*AuxCall)
-			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV5")) {
+			if !ok || aux.Fn == nil || (!strings.Contains(aux.Fn.Name, "runtime.obfStringDataV2") && !strings.Contains(aux.Fn.Name, "runtime.obfStringDataV3") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV4") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV5") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV5") && !strings.Contains(aux.Fn.Name, "runtime.obfStringTokenV6") && !strings.Contains(aux.Fn.Name, "runtime.obfStringByteV6")) {
 				continue
 			}
 			for _, arg := range v.Args {
@@ -970,14 +1049,17 @@ func insertOpaqueDiamond(f *Func, rng *protectionRNG) error {
 
 // nativeOpaqueCoverage records the native control-flow work applied by
 // //go:obf. Single-block arithmetic keeps the compact v1 diamond. Broader
-// functions are protected by v2 edge dispatchers, so callers can distinguish
-// complete CFG coverage from a budget-limited subset in OBFREPORT output.
+// functions are protected by v3 layered edge dispatchers, so callers can
+// distinguish complete CFG coverage from a budget-limited subset in OBFREPORT
+// output without turning compile time into an unbounded function of CFG size.
 type nativeOpaqueCoverage struct {
 	legacy          bool
 	wiredEdges      int
 	candidateEdges  int
 	wiredBlocks     int
 	candidateBlocks int
+	layers          int
+	maxDepth        int
 	budget          int
 }
 
@@ -989,8 +1071,8 @@ func (c nativeOpaqueCoverage) report() string {
 	if c.wiredEdges != c.candidateEdges {
 		scope = "budgeted"
 	}
-	return fmt.Sprintf("obf=cfg-opaque-dispatch-v2 coverage=%s edges=%d/%d blocks=%d/%d budget=%d",
-		scope, c.wiredEdges, c.candidateEdges, c.wiredBlocks, c.candidateBlocks, c.budget)
+	return fmt.Sprintf("obf=cfg-opaque-dispatch-v3 coverage=%s edges=%d/%d blocks=%d/%d layers=%d max-depth=%d budget=%d",
+		scope, c.wiredEdges, c.candidateEdges, c.wiredBlocks, c.candidateBlocks, c.layers, c.maxDepth, c.budget)
 }
 
 type nativeOpaqueEdge struct {
@@ -1000,9 +1082,10 @@ type nativeOpaqueEdge struct {
 }
 
 // insertNativeOpaqueDispatch selects the compact v1 shape when possible and
-// otherwise wraps normal CFG edges in seed-dependent opaque dispatch diamonds.
-// The original target predecessor slot is retained and retargeted to the merge
-// block, so existing Phi arguments and memory dependencies remain valid.
+// otherwise wraps normal CFG edges in one to three seed-dependent opaque
+// dispatch layers. The original target predecessor slot is retained and
+// retargeted to the final merge block, so existing Phi arguments and memory
+// dependencies remain valid.
 func insertNativeOpaqueDispatch(f *Func, rng *protectionRNG) (nativeOpaqueCoverage, error) {
 	if _, _, _, err := pureUint64Return(f); err == nil {
 		if err := insertOpaqueDiamond(f, rng); err != nil {
@@ -1012,7 +1095,7 @@ func insertNativeOpaqueDispatch(f *Func, rng *protectionRNG) (nativeOpaqueCovera
 	}
 
 	if f.Config.PtrSize != 8 {
-		return nativeOpaqueCoverage{}, fmt.Errorf("v2 requires a 64-bit target")
+		return nativeOpaqueCoverage{}, fmt.Errorf("v3 requires a 64-bit target")
 	}
 	source, err := nativeOpaqueSource(f)
 	if err != nil {
@@ -1027,6 +1110,9 @@ func insertNativeOpaqueDispatch(f *Func, rng *protectionRNG) (nativeOpaqueCovera
 			continue
 		}
 		for succIndex, edge := range block.Succs {
+			if !nativeOpaqueEdgeEligible(block, succIndex) {
+				continue
+			}
 			if edge.b == nil || edge.b == f.Entry {
 				continue
 			}
@@ -1043,6 +1129,8 @@ func insertNativeOpaqueDispatch(f *Func, rng *protectionRNG) (nativeOpaqueCovera
 			candidateEdges:  1,
 			wiredBlocks:     1,
 			candidateBlocks: 1,
+			layers:          1,
+			maxDepth:        1,
 			budget:          1,
 		}, nil
 	}
@@ -1062,10 +1150,54 @@ func insertNativeOpaqueDispatch(f *Func, rng *protectionRNG) (nativeOpaqueCovera
 	if limit > len(edges) {
 		limit = len(edges)
 	}
+	layerCounts := make([]int, limit)
+	for i := range layerCounts {
+		layerCounts[i] = 1
+	}
+	// Spend the remaining budget on deeper layers in a separately shuffled
+	// order. The cap keeps each source edge locally bounded even when callers
+	// choose a large budget for a small function.
+	remaining := budget - limit
+	depthOrder := make([]int, limit)
+	for i := range depthOrder {
+		depthOrder[i] = i
+	}
+	for i := len(depthOrder) - 1; i > 0; i-- {
+		j := int(rng.next() % uint64(i+1))
+		depthOrder[i], depthOrder[j] = depthOrder[j], depthOrder[i]
+	}
+	for remaining > 0 {
+		advanced := false
+		for _, index := range depthOrder {
+			if remaining == 0 {
+				break
+			}
+			if layerCounts[index] >= 3 {
+				continue
+			}
+			layerCounts[index]++
+			remaining--
+			advanced = true
+		}
+		if !advanced {
+			break
+		}
+	}
 	covered := make(map[*Block]bool)
-	for _, edge := range edges[:limit] {
-		if err := wrapNativeOpaqueEdge(f, edge, source, rng); err != nil {
-			return nativeOpaqueCoverage{}, err
+	layers := 0
+	maxDepth := 0
+	for i, edge := range edges[:limit] {
+		current := edge
+		for depth := 0; depth < layerCounts[i]; depth++ {
+			next, err := wrapNativeOpaqueEdge(f, current, source, rng)
+			if err != nil {
+				return nativeOpaqueCoverage{}, err
+			}
+			current = next
+			layers++
+		}
+		if layerCounts[i] > maxDepth {
+			maxDepth = layerCounts[i]
 		}
 		covered[edge.source] = true
 	}
@@ -1074,20 +1206,28 @@ func insertNativeOpaqueDispatch(f *Func, rng *protectionRNG) (nativeOpaqueCovera
 		candidateEdges:  len(edges),
 		wiredBlocks:     len(covered),
 		candidateBlocks: len(blockSet),
+		layers:          layers,
+		maxDepth:        maxDepth,
 		budget:          budget,
 	}, nil
 }
 
-// nativeOpaqueSourceBlock includes the ordinary conditional and plain CFG
-// edges plus the post-defer continuation edges. The latter already carry their
-// memory control in the source block, so edge wrapping leaves that ordering and
-// both original successor indices intact.
+// nativeOpaqueSourceBlock includes ordinary conditional/plain CFG edges,
+// post-defer continuations, switch jump tables, and the reachable arm of a
+// BlockFirst. The latter is further constrained by nativeOpaqueEdgeEligible.
 func nativeOpaqueSourceBlock(block *Block) bool {
 	switch block.Kind {
-	case BlockPlain, BlockIf, BlockDefer:
+	case BlockPlain, BlockIf, BlockDefer, BlockJumpTable, BlockFirst:
 		return true
 	}
 	return false
+}
+
+func nativeOpaqueEdgeEligible(block *Block, succIndex int) bool {
+	if block.Kind == BlockFirst {
+		return succIndex == 0
+	}
+	return true
 }
 
 // nativeOpaqueSource provides a dynamic uint64 whose value is never used as a
@@ -1106,7 +1246,7 @@ func nativeOpaqueSource(f *Func) (*Value, error) {
 		}
 	}
 	if initMem == nil {
-		return nil, fmt.Errorf("v2 could not find entry memory for opaque dispatch")
+		return nil, fmt.Errorf("v3 could not find entry memory for opaque dispatch")
 	}
 	sp := f.Entry.NewValue0(f.Entry.Pos, OpSP, f.Config.Types.Uintptr)
 	return f.Entry.NewValue2(f.Entry.Pos, OpConvert, f.Config.Types.UInt64, sp, initMem), nil
@@ -1119,7 +1259,7 @@ func nativeOpaqueSource(f *Func) (*Value, error) {
 func insertNativeOpaqueReturnEnvelope(f *Func, source *Value, rng *protectionRNG) error {
 	entry := f.Entry
 	if entry.Kind != BlockRet || len(entry.Succs) != 0 || entry.NumControls() != 1 {
-		return fmt.Errorf("v2 found no normal CFG edges or compatible return envelope")
+		return fmt.Errorf("v3 found no normal CFG edges or compatible return envelope")
 	}
 	result := entry.Controls[0]
 	resultIndex := -1
@@ -1130,7 +1270,7 @@ func insertNativeOpaqueReturnEnvelope(f *Func, source *Value, rng *protectionRNG
 		}
 	}
 	if resultIndex < 0 {
-		return fmt.Errorf("v2 return control is not owned by the entry block")
+		return fmt.Errorf("v3 return control is not owned by the entry block")
 	}
 
 	left := f.NewBlock(BlockPlain)
@@ -1166,27 +1306,32 @@ func nativeOpaqueCondition(block *Block, source *Value, rng *protectionRNG) *Val
 }
 
 // wrapNativeOpaqueEdge changes source -> target into source -> check ->
-// (left|right) -> merge -> target. The old predecessor index in target is
-// intentionally reused by merge, preserving every target Phi input verbatim.
-func wrapNativeOpaqueEdge(f *Func, edge nativeOpaqueEdge, source *Value, rng *protectionRNG) error {
+// (direct | detour -> relay) -> merge -> target. The asymmetric paths make
+// selector layers less regular while retaining a side-effect-free route on
+// both branches. It returns the merge -> target edge for a possible next
+// layer; the old predecessor index in target is reused by merge, preserving
+// every target Phi input verbatim.
+func wrapNativeOpaqueEdge(f *Func, edge nativeOpaqueEdge, source *Value, rng *protectionRNG) (nativeOpaqueEdge, error) {
 	if edge.source == nil || edge.target == nil || edge.succIndex < 0 || edge.succIndex >= len(edge.source.Succs) {
-		return fmt.Errorf("v2 encountered a malformed CFG edge")
+		return nativeOpaqueEdge{}, fmt.Errorf("v3 encountered a malformed CFG edge")
 	}
 	old := edge.source.Succs[edge.succIndex]
 	if old.b != edge.target || old.i < 0 || old.i >= len(edge.target.Preds) {
-		return fmt.Errorf("v2 edge changed before it could be wrapped")
+		return nativeOpaqueEdge{}, fmt.Errorf("v3 edge changed before it could be wrapped")
 	}
 	if pred := edge.target.Preds[old.i]; pred.b != edge.source || pred.i != edge.succIndex {
-		return fmt.Errorf("v2 encountered an inconsistent CFG edge")
+		return nativeOpaqueEdge{}, fmt.Errorf("v3 encountered an inconsistent CFG edge")
 	}
 
 	check := f.NewBlock(BlockIf)
-	left := f.NewBlock(BlockPlain)
-	right := f.NewBlock(BlockPlain)
+	direct := f.NewBlock(BlockPlain)
+	detour := f.NewBlock(BlockPlain)
+	relay := f.NewBlock(BlockPlain)
 	merge := f.NewBlock(BlockPlain)
 	check.Pos = edge.source.Pos
-	left.Pos = edge.source.Pos
-	right.Pos = edge.source.Pos
+	direct.Pos = edge.source.Pos
+	detour.Pos = edge.source.Pos
+	relay.Pos = edge.source.Pos
 	merge.Pos = edge.target.Pos
 	check.SetControl(nativeOpaqueCondition(check, source, rng))
 	check.Likely = BranchUnknown
@@ -1200,12 +1345,18 @@ func wrapNativeOpaqueEdge(f *Func, edge nativeOpaqueEdge, source *Value, rng *pr
 	mergeSuccIndex := len(merge.Succs)
 	merge.Succs = append(merge.Succs, Edge{b: edge.target, i: old.i})
 	edge.target.Preds[old.i] = Edge{b: merge, i: mergeSuccIndex}
-	check.AddEdgeTo(left)
-	check.AddEdgeTo(right)
-	left.AddEdgeTo(merge)
-	right.AddEdgeTo(merge)
+	if rng.next()&1 == 0 {
+		check.AddEdgeTo(direct)
+		check.AddEdgeTo(detour)
+	} else {
+		check.AddEdgeTo(detour)
+		check.AddEdgeTo(direct)
+	}
+	direct.AddEdgeTo(merge)
+	detour.AddEdgeTo(relay)
+	relay.AddEdgeTo(merge)
 	f.invalidateCFG()
-	return nil
+	return nativeOpaqueEdge{source: merge, succIndex: mergeSuccIndex, target: edge.target}, nil
 }
 
 // vm2 is a register-based, control-flow preserving VM.  It deliberately

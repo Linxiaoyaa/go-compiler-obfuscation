@@ -94,6 +94,29 @@ func TestObfStringDataV5LeaseStream(t *testing.T) {
 	}
 }
 
+func TestObfStringDataV6TicketStream(t *testing.T) {
+	plain := []byte("string-v6-ticket-bound-byte-stream")
+	lanes := [4]uint64{0x13579bdf2468ace0, 0x1020304050607080, 0xfedcba9876543210, 0x0f1e2d3c4b5a6978}
+	const (
+		lease  = uint64(0x6a09e667f3bcc909)
+		ticket = uint64(0xbb67ae8584caa73b)
+	)
+	for decoder := 0; decoder < 4; decoder++ {
+		ciphertext := make([]byte, len(plain))
+		for i := range ciphertext {
+			ciphertext[i] = plain[i] ^ obfStringMaskV6ForTest(lanes, lease, ticket, uint8(decoder), i)
+		}
+		got := runtime.ObfStringDataV6ForTest(uint8(decoder), ciphertext, lanes, lease, ticket)
+		if !bytes.Equal(got, plain) {
+			t.Fatalf("decoder %d ticket stream = %q; want %q", decoder, got, plain)
+		}
+		wrongTicket := runtime.ObfStringDataV6ForTest(uint8(decoder), ciphertext, lanes, lease, ticket^1)
+		if bytes.Equal(wrongTicket, plain) {
+			t.Fatalf("decoder %d accepted a modified ticket", decoder)
+		}
+	}
+}
+
 func obfStringMaskForTest(lanes [4]uint64, decoder uint8, index int) byte {
 	i := uint64(index)
 	a, b, c, d := lanes[0], lanes[1], lanes[2], lanes[3]
@@ -133,6 +156,17 @@ func obfStringMaskV5ForTest(lanes [4]uint64, lease uint64, decoder uint8, index 
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
 	return obfStringMaskForTest(lanes, decoder, index) ^ byte(x>>uint((i&7)*8))
+}
+
+func obfStringMaskV6ForTest(lanes [4]uint64, lease, ticket uint64, decoder uint8, index int) byte {
+	i := uint64(index)
+	x := ticket ^ rotateObf64Test(lease, uint((i+uint64(decoder)*13)&63))
+	x += lanes[(i+uint64(decoder)*3)&3] + i*0x9e3779b185ebca87
+	x ^= rotateObf64Test(lanes[(i+uint64(decoder)+2)&3]^ticket, uint((i+29)&63))
+	x ^= x >> 27
+	x *= 0xd6e8feb86659fd93
+	x ^= x >> 33
+	return obfStringMaskV5ForTest(lanes, lease, decoder, index) ^ byte(x>>uint((i&7)*8))
 }
 
 func rotateObf64Test(x uint64, n uint) uint64 {

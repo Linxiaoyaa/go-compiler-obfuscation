@@ -138,6 +138,13 @@ func protectedStringLeaseStreamCheck(last int) bool {
 }
 
 //go:encrypt
+//go:streamv6
+func protectedStringTicketStreamCheck(last int) bool {
+	s := "obf-runtime-string-v6-ticket"
+	return len(s) == 28 && s[0] == 'o' && s[19] == 'v' && s[last] == 't'
+}
+
+//go:encrypt
 func protectedStringMap() string {
 	m := map[string]string{"obf-runtime-map-key": "obf-runtime-map-value"}
 	return m["obf-runtime-map-key"]
@@ -273,6 +280,9 @@ func TestProtectionDirectives(t *testing.T) {
 	}
 	if !protectedStringLeaseStreamCheck(26) {
 		t.Fatal("protectedStringLeaseStreamCheck() = false")
+	}
+	if !protectedStringTicketStreamCheck(27) {
+		t.Fatal("protectedStringTicketStreamCheck() = false")
 	}
 	if got := protectedStringMap(); got != "obf-runtime-map-value" {
 		t.Fatalf("protectedStringMap() = %q", got)

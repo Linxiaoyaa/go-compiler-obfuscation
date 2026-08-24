@@ -52,7 +52,8 @@ try {
     $plaintext = @(
         "full-ephemeral-v3",
         "full-stream-byte-v4",
-        "full-lease-token-v5"
+        "full-lease-token-v5",
+        "full-ticket-token-v6"
     )
     Push-Location $fixture
     try {
@@ -82,9 +83,9 @@ try {
         -CompilerPath $exeProfile.compiler.path `
         -CompilerRoot $root `
         -RequireCompilerBinary -RequireCompilerSource -RequireTooling `
-        -RequireRuntimeGuardV3 -RequireStringV4 -RequireStringV5 `
-        -RequireFunction @("main.vmMix", "main.ephemeralCheck", "main.streamCheck", "main.leaseCheck", "main.encryptedInput") `
-        -MinReportFunctions 5 -MinV4Aliases 1 `
+        -RequireRuntimeGuardV4 -RequireStringV4 -RequireStringV5 -RequireStringV6 -RequireResidualScan `
+        -RequireFunction @("main.vmMix", "main.ephemeralCheck", "main.streamCheck", "main.leaseCheck", "main.ticketCheck", "main.encryptedInput") `
+        -MinReportFunctions 6 -MinV4Aliases 1 `
         -ExpectedAbsent $plaintext `
         -ForbiddenMetadata @($root, $fixture)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -123,9 +124,9 @@ try {
         -CompilerPath $soProfile.compiler.path `
         -CompilerRoot $root `
         -RequireCompilerBinary -RequireCompilerSource -RequireTooling `
-        -RequireRuntimeGuardV3 -RequireStringV4 -RequireStringV5 -RequireCHeader `
-        -RequireFunction @("main.vmMix", "main.ephemeralCheck", "main.streamCheck", "main.leaseCheck", "main.encryptedInput") `
-        -MinReportFunctions 5 -MinV4Aliases 1 `
+        -RequireRuntimeGuardV4 -RequireStringV4 -RequireStringV5 -RequireStringV6 -RequireResidualScan -RequireCHeader `
+        -RequireFunction @("main.vmMix", "main.ephemeralCheck", "main.streamCheck", "main.leaseCheck", "main.ticketCheck", "main.encryptedInput") `
+        -MinReportFunctions 6 -MinV4Aliases 1 `
         -ExpectedAbsent $plaintext `
         -ForbiddenMetadata @($root, $fixture)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

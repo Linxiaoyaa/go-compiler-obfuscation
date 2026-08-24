@@ -26,6 +26,7 @@ type ObfuscatedStringKey struct {
 	Lanes   [4]uint64
 	Decoder uint8
 	Lease   uint64
+	Ticket  uint64
 }
 
 const protectedFunctionFlags = ir.ProtectObfuscate | ir.ProtectEncrypt | ir.ProtectVirtualize
@@ -121,11 +122,22 @@ func ObfuscatedStringSymV5(pos src.XPos, functionName, seed, text string) (*obj.
 	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v5")
 }
 
+// ObfuscatedStringSymV6 emits ciphertext for a capability-bound stream-only
+// literal. In addition to the v5 lease, v6 carries an independently derived
+// ticket through the token and each byte decode so copied call operands cannot
+// satisfy a decoder from a different literal domain.
+func ObfuscatedStringSymV6(pos src.XPos, functionName, seed, text string) (*obj.LSym, ObfuscatedStringKey) {
+	key := obfuscatedStringKeyV6(functionName, seed, text)
+	return obfuscatedStringSym(pos, text, key, "go-obf-string-symbol-v6")
+}
+
 func obfuscatedStringSym(pos src.XPos, text string, key ObfuscatedStringKey, symbolDomain string) (*obj.LSym, ObfuscatedStringKey) {
 	ciphertext := make([]byte, len(text))
 	for i := range ciphertext {
 		mask := obfuscatedStringMaskV2(key.Lanes, key.Decoder, i)
-		if key.Lease != 0 {
+		if key.Ticket != 0 {
+			mask = obfuscatedStringMaskV6(key.Lanes, key.Lease, key.Ticket, key.Decoder, i)
+		} else if key.Lease != 0 {
 			mask = obfuscatedStringMaskV5(key.Lanes, key.Lease, key.Decoder, i)
 		}
 		ciphertext[i] = text[i] ^ mask
@@ -194,6 +206,32 @@ func obfuscatedStringKeyV5(functionName, seed, text string) ObfuscatedStringKey 
 		key.Lease = 0x6a09e667f3bcc909
 	}
 	key.Decoder = (literal[5] ^ literal[29] ^ lease[13]) & 3
+	return key
+}
+
+func obfuscatedStringKeyV6(functionName, seed, text string) ObfuscatedStringKey {
+	root := hashParts([]byte("go-obf-string-v6/root"), []byte(seed))
+	function := hashParts(root[:], []byte("function"), []byte(functionName))
+	literal := hashParts(function[:], []byte("ticket-stream-literal"), []byte(text))
+	mask := hashParts(literal[:], []byte("ticket-stream-mask"))
+	lease := hashParts(mask[:], []byte("lease"), function[:])
+	ticket := hashParts(literal[:], []byte("ticket"), root[:])
+
+	var key ObfuscatedStringKey
+	for i := range key.Lanes {
+		off := i * 8
+		key.Lanes[i] = binary.LittleEndian.Uint64(literal[off:off+8]) ^
+			binary.LittleEndian.Uint64(mask[off:off+8])
+	}
+	key.Lease = binary.LittleEndian.Uint64(lease[:8]) ^ binary.LittleEndian.Uint64(mask[24:32])
+	if key.Lease == 0 {
+		key.Lease = 0x6a09e667f3bcc909
+	}
+	key.Ticket = binary.LittleEndian.Uint64(ticket[:8]) ^ binary.LittleEndian.Uint64(lease[16:24])
+	if key.Ticket == 0 {
+		key.Ticket = 0xbb67ae8584caa73b
+	}
+	key.Decoder = (literal[3] ^ literal[21] ^ lease[11] ^ ticket[19]) & 3
 	return key
 }
 
@@ -267,6 +305,17 @@ func obfuscatedStringMaskV5(lanes [4]uint64, lease uint64, decoder uint8, index 
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
 	return obfuscatedStringMaskV2(lanes, decoder, index) ^ byte(x>>uint((i&7)*8))
+}
+
+func obfuscatedStringMaskV6(lanes [4]uint64, lease, ticket uint64, decoder uint8, index int) byte {
+	i := uint64(index)
+	x := ticket ^ rotate64(lease, uint((i+uint64(decoder)*13)&63))
+	x += lanes[(i+uint64(decoder)*3)&3] + i*0x9e3779b185ebca87
+	x ^= rotate64(lanes[(i+uint64(decoder)+2)&3]^ticket, uint((i+29)&63))
+	x ^= x >> 27
+	x *= 0xd6e8feb86659fd93
+	x ^= x >> 33
+	return obfuscatedStringMaskV5(lanes, lease, decoder, index) ^ byte(x>>uint((i&7)*8))
 }
 
 func rotate64(x uint64, n uint) uint64 {

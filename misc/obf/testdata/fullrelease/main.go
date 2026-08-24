@@ -41,6 +41,13 @@ func leaseCheck() bool {
 }
 
 //go:encrypt
+//go:streamv6
+func ticketCheck() bool {
+	s := "full-ticket-token-v6"
+	return len(s) == 20 && s[0] == 'f' && s[5] == 't' && s[19] == '6'
+}
+
+//go:encrypt
 func encryptedInput(input uint64) uint64 {
 	return input ^ 0x243f6a8885a308d3
 }
@@ -51,7 +58,7 @@ func FullProtectVerify(input C.ulonglong) C.ulonglong {
 }
 
 func main() {
-	if !ephemeralCheck() || !streamCheck() || !leaseCheck() || FullProtectVerify(C.ulonglong(7)) == 0 {
+	if !ephemeralCheck() || !streamCheck() || !leaseCheck() || !ticketCheck() || FullProtectVerify(C.ulonglong(7)) == 0 {
 		panic(uint64(0))
 	}
 }

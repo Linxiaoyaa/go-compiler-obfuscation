@@ -645,6 +645,17 @@ var obfRuntimeGuardV3Seal [2]uint64 = [2]uint64{obfRuntimeGuardV3Unpatched, obfR
 var obfRuntimeGuardV3Bootstrap uint64 = obfRuntimeGuardV3Unpatched
 var obfRuntimeGuardV3Platform uint64 = obfRuntimeGuardV3Unpatched
 
+// Runtime Guard v4 adds a linker-derived seal over final pclntab dimensions.
+// metadataKey is compiler/build derived; metadataSeal is only available after
+// cmd/link has emitted the final function table.
+const obfRuntimeGuardV4Unpatched uint64 = 0xa5a5a5a5a5a5a5a5
+
+var obfRuntimeGuardV4Seal [2]uint64 = [2]uint64{obfRuntimeGuardV4Unpatched, obfRuntimeGuardV4Unpatched}
+var obfRuntimeGuardV4Bootstrap uint64 = obfRuntimeGuardV4Unpatched
+var obfRuntimeGuardV4Platform uint64 = obfRuntimeGuardV4Unpatched
+var obfRuntimeGuardV4MetadataKey uint64 = obfRuntimeGuardV4Unpatched
+var obfRuntimeGuardV4MetadataSeal uint64 = obfRuntimeGuardV4Unpatched
+
 func expectedPclnMagic() abi.PCLnTabMagic {
 	if obfPclnMagic != obfPclnMagicUnpatched {
 		return obfPclnMagic

@@ -3762,13 +3762,17 @@ func (s *state) exprCheckPtr(n ir.Node, checkPtrOK bool) *ssa.Value {
 
 // obfuscatedStringLiteral lowers a protected literal to its selected runtime
 // representation. String v2/v3 decoders return plaintext backing storage.
-// String v4 returns an opaque ciphertext token; the SSA stream pass replaces
+// String v4-v6 return opaque ciphertext tokens; the SSA stream pass replaces
 // approved byte loads with one-byte decoder calls before code generation.
 func (s *state) obfuscatedStringLiteral(t *types.Type, text string) *ssa.Value {
 	var sym *obj.LSym
 	var key staticdata.ObfuscatedStringKey
 	version := 2
-	if s.curfn.Protection&ir.ProtectStreamV5 != 0 {
+	if s.curfn.Protection&ir.ProtectStreamV6 != 0 {
+		sym, key = staticdata.ObfuscatedStringSymV6(
+			s.curfn.Pos(), ir.FuncName(s.curfn), base.Debug.ObfSeed, text)
+		version = 6
+	} else if s.curfn.Protection&ir.ProtectStreamV5 != 0 {
 		sym, key = staticdata.ObfuscatedStringSymV5(
 			s.curfn.Pos(), ir.FuncName(s.curfn), base.Debug.ObfSeed, text)
 		version = 5
@@ -3791,8 +3795,11 @@ func (s *state) obfuscatedStringLiteral(t *types.Type, text string) *ssa.Value {
 		keys[i] = s.newValue0I(ssa.OpConst64, s.config.Types.UInt64, int64(lane))
 	}
 	args := []*ssa.Value{ptr, length, keys[0], keys[1], keys[2], keys[3]}
-	if version == 5 {
+	if version >= 5 {
 		args = append(args, s.newValue0I(ssa.OpConst64, s.config.Types.UInt64, int64(key.Lease)))
+	}
+	if version == 6 {
+		args = append(args, s.newValue0I(ssa.OpConst64, s.config.Types.UInt64, int64(key.Ticket)))
 	}
 	results := s.rtcall(
 		typecheck.LookupRuntimeFunc(obfuscatedStringRuntimeName(version, key.Decoder)),
@@ -3811,6 +3818,8 @@ func obfuscatedStringRuntimeName(version int, decoder uint8) string {
 		prefix = "obfStringTokenV4"
 	} else if version == 5 {
 		prefix = "obfStringTokenV5"
+	} else if version == 6 {
+		prefix = "obfStringTokenV6"
 	}
 	switch decoder & 3 {
 	case 0:
@@ -8085,7 +8094,9 @@ func (e *ssafn) Syslook(name string) *obj.LSym {
 		"obfStringByteV4A", "obfStringByteV4B", "obfStringByteV4C", "obfStringByteV4D",
 		"obfStringTokenV5A", "obfStringTokenV5B", "obfStringTokenV5C", "obfStringTokenV5D",
 		"obfStringByteV5A", "obfStringByteV5B", "obfStringByteV5C", "obfStringByteV5D",
-		"obfRuntimeGuardV1", "obfRuntimeGuardV2", "obfRuntimeGuardV3":
+		"obfStringTokenV6A", "obfStringTokenV6B", "obfStringTokenV6C", "obfStringTokenV6D",
+		"obfStringByteV6A", "obfStringByteV6B", "obfStringByteV6C", "obfStringByteV6D",
+		"obfRuntimeGuardV1", "obfRuntimeGuardV2", "obfRuntimeGuardV3", "obfRuntimeGuardV4":
 		return typecheck.LookupRuntimeFunc(name)
 	}
 	e.Fatalf(src.NoXPos, "unknown Syslook func %v", name)

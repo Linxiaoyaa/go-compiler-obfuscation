@@ -16,6 +16,7 @@ const (
 	obfPclnMagicUnpatched uint32 = 0xa5a5a5a5
 	obfRuntimeGuardV2None uint64 = 0xa5a5a5a5a5a5a5a5
 	obfRuntimeGuardV3None uint64 = 0xa5a5a5a5a5a5a5a5
+	obfRuntimeGuardV4None uint64 = 0xa5a5a5a5a5a5a5a5
 )
 
 // ObfRuntimeGuardV1Values returns the function-local tag and seal consumed by
@@ -72,6 +73,28 @@ func ObfRuntimeGuardV3ValuesForTarget(seed, function, target string) (tag, seal,
 	return
 }
 
+// ObfRuntimeGuardV4Values derives v4's function, image, and metadata-key
+// bindings for a target. The linker turns metadataKey into a final-image seal
+// after pclntab generation; the compiler-only function seal binds that key to
+// the entry record without embedding the build seed in the binary.
+func ObfRuntimeGuardV4Values(seed, function string) (tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey uint64) {
+	return ObfRuntimeGuardV4ValuesForTarget(seed, function, buildcfg.GOOS+"/"+buildcfg.GOARCH)
+}
+
+// ObfRuntimeGuardV4ValuesForTarget is split out for deterministic tests and
+// cross-compilation tooling.
+func ObfRuntimeGuardV4ValuesForTarget(seed, function, target string) (tag, seal, bootstrap, imageLo, imageHi, platform, metadataKey uint64) {
+	tagDigest := obfRuntimeGuardV3Digest("go-obf-runtime-guard-v4/function", seed, target, function)
+	tag = binary.LittleEndian.Uint64(tagDigest[:8])
+	bootstrap = obfRuntimeGuardV4Word("go-obf-runtime-guard-v4/bootstrap", seed, target)
+	imageLo = obfRuntimeGuardV4Word("go-obf-runtime-guard-v4/image-lo", seed, target)
+	imageHi = obfRuntimeGuardV4Word("go-obf-runtime-guard-v4/image-hi", seed, target)
+	platform = obfRuntimeGuardV4Word("go-obf-runtime-guard-v4/platform", "", target)
+	metadataKey = obfRuntimeGuardV4Word("go-obf-runtime-guard-v4/metadata-key", seed, target)
+	seal = obfRuntimeGuardSealV4(tag, obfRuntimeEntryKey(seed), obfRuntimePclnMagic(seed), bootstrap, imageLo, imageHi, platform, metadataKey)
+	return
+}
+
 func obfRuntimeGuardV3Digest(domain, seed, target, function string) [32]byte {
 	return sha256.Sum256([]byte(domain + "\x00" + seed + "\x00" + target + "\x00" + function))
 }
@@ -80,6 +103,15 @@ func obfRuntimeGuardV3Word(domain, seed, target string) uint64 {
 	digest := sha256.Sum256([]byte(domain + "\x00" + seed + "\x00" + target))
 	word := binary.LittleEndian.Uint64(digest[:8])
 	if word == 0 || word == obfRuntimeGuardV3None {
+		return 0x6a09e667f3bcc909
+	}
+	return word
+}
+
+func obfRuntimeGuardV4Word(domain, seed, target string) uint64 {
+	digest := sha256.Sum256([]byte(domain + "\x00" + seed + "\x00" + target))
+	word := binary.LittleEndian.Uint64(digest[:8])
+	if word == 0 || word == obfRuntimeGuardV4None {
 		return 0x6a09e667f3bcc909
 	}
 	return word
@@ -128,6 +160,17 @@ func obfRuntimeGuardSealV3(tag uint64, entryKey, magic uint32, bootstrap, imageL
 	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap ^ imageLo
 	x ^= bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31)
 	x ^= 0x243f6a8885a308d3
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+func obfRuntimeGuardSealV4(tag uint64, entryKey, magic uint32, bootstrap, imageLo, imageHi, platform, metadataKey uint64) uint64 {
+	x := tag ^ (uint64(entryKey) << 32) ^ uint64(magic) ^ bootstrap ^ imageLo ^ metadataKey
+	x ^= bits.RotateLeft64(imageHi, 17) ^ bits.RotateLeft64(platform, 31) ^ bits.RotateLeft64(metadataKey, 43)
+	x ^= 0x452821e638d01377
 	x ^= x >> 30
 	x *= 0xbf58476d1ce4e5b9
 	x ^= x >> 27

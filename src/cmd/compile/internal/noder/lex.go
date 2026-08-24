@@ -95,6 +95,8 @@ func protectionFlag(verb string) ir.ProtectionFlag {
 		return ir.ProtectStream
 	case "go:streamv5":
 		return ir.ProtectStreamV5
+	case "go:streamv6":
+		return ir.ProtectStreamV6
 	}
 	return 0
 }

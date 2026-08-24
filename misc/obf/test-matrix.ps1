@@ -30,7 +30,8 @@ try {
     }
     foreach ($negative in @(
         [pscustomobject]@{ Name = "v4"; Fixture = "v4negative" },
-        [pscustomobject]@{ Name = "v5"; Fixture = "v5negative" }
+        [pscustomobject]@{ Name = "v5"; Fixture = "v5negative" },
+        [pscustomobject]@{ Name = "v6"; Fixture = "v6negative" }
     )) {
         $negativeFixture = Join-Path $PSScriptRoot ("testdata\" + $negative.Fixture)
         $negativeArtifact = Join-Path $OutDir ($negative.Fixture + ".exe")
@@ -97,11 +98,12 @@ try {
         RequireCompilerBinary = $true
         RequireCompilerSource = $true
         RequireTooling = $true
-        RequireRuntimeGuardV3 = $true
+        RequireRuntimeGuardV4 = $true
         RequireNativeCFG = $true
         RequireNativeCFGFull = $true
-        RequireFunction = @("main.nativeBranch", "main.nativeLoopCall", "main.nativeDefer", "main.nativeBool", "main.nativeZeroArg")
-        MinReportFunctions = 5
+        RequireResidualScan = $true
+        RequireFunction = @("main.nativeBranch", "main.nativeLoopCall", "main.nativeDefer", "main.nativeBool", "main.nativeZeroArg", "main.nativeSwitch", "main.nativeMultiReturn", "main.nativeRecover")
+        MinReportFunctions = 8
     }
     if ($RequireCleanCompiler) {
         $nativeVerifyArgs.RequireCleanCompiler = $true
@@ -112,7 +114,7 @@ try {
         & $nativeArtifact
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    Write-Output "matrix pass: native CFG v2 windows/amd64"
+    Write-Output "matrix pass: native CFG v3 windows/amd64"
 
     foreach ($tuple in $Target) {
         if ($tuple -notmatch '^([a-z0-9]+)/(\w+)$') {
@@ -138,7 +140,7 @@ try {
                 -Report $profile `
                 -Manifest $manifest `
                 -VMBudget 2048 `
-                -ScanPlaintext @("v38-cross-platform-ephemeral", "v4-stream-byte-check", "v5-lease-stream-check")
+                -ScanPlaintext @("v38-cross-platform-ephemeral", "v4-stream-byte-check", "v5-lease-stream-check", "v6-ticket-stream-check")
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         } finally {
             Pop-Location
@@ -155,13 +157,15 @@ try {
             RequireCompilerSource = $true
             RequireTooling = $true
             RequireRuntimeChecks = $true
-            RequireRuntimeGuardV3 = $true
+            RequireRuntimeGuardV4 = $true
             RequireStringV4 = $true
             RequireStringV5 = $true
-            RequireFunction = @("main.vmCalc", "main.secretCheck", "main.streamCheck", "main.leaseStreamCheck")
-            MinReportFunctions = 4
+            RequireStringV6 = $true
+            RequireResidualScan = $true
+            RequireFunction = @("main.vmCalc", "main.secretCheck", "main.streamCheck", "main.leaseStreamCheck", "main.ticketStreamCheck")
+            MinReportFunctions = 5
             MinV4Aliases = 1
-            ExpectedAbsent = @("v38-cross-platform-ephemeral", "v4-stream-byte-check", "v5-lease-stream-check")
+            ExpectedAbsent = @("v38-cross-platform-ephemeral", "v4-stream-byte-check", "v5-lease-stream-check", "v6-ticket-stream-check")
             ForbiddenMetadata = @($env:GO_OBF_SEED, $root, $fixture)
         }
         if ($RequireCleanCompiler) {

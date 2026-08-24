@@ -16,6 +16,7 @@ import (
 	"hash/fnv"
 	"internal/abi"
 	"internal/buildcfg"
+	"math/bits"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -44,6 +45,15 @@ const (
 	obfRuntimeGuardV3BootstrapSym = "runtime.obfRuntimeGuardV3Bootstrap"
 	obfRuntimeGuardV3PlatformSym  = "runtime.obfRuntimeGuardV3Platform"
 	obfRuntimeGuardV3Unpatched    = uint64(0xa5a5a5a5a5a5a5a5)
+)
+
+const (
+	obfRuntimeGuardV4SealSym         = "runtime.obfRuntimeGuardV4Seal"
+	obfRuntimeGuardV4BootstrapSym    = "runtime.obfRuntimeGuardV4Bootstrap"
+	obfRuntimeGuardV4PlatformSym     = "runtime.obfRuntimeGuardV4Platform"
+	obfRuntimeGuardV4MetadataKeySym  = "runtime.obfRuntimeGuardV4MetadataKey"
+	obfRuntimeGuardV4MetadataSealSym = "runtime.obfRuntimeGuardV4MetadataSeal"
+	obfRuntimeGuardV4Unpatched       = uint64(0xa5a5a5a5a5a5a5a5)
 )
 
 // pclntab holds the state needed for pclntab generation.
@@ -516,6 +526,88 @@ func (ctxt *Link) configureObfRuntimeGuardV3() {
 	patchGuardV3Word(ctxt, obfRuntimeGuardV3PlatformSym, *flagObfGuardV3Platform)
 }
 
+// configureObfRuntimeGuardV4 patches the static image lanes and the seal over
+// final runtime.pclntable dimensions. It must run after generateFuncdata so
+// all generated pclntab state has settled before the metadata seal is fixed.
+func (ctxt *Link) configureObfRuntimeGuardV4(state *pclntab) {
+	if !*flagObfGuardV4 {
+		return
+	}
+	if state == nil || state.pclntab == 0 {
+		Exitf("-obfguardv4 requires a generated pclntab")
+	}
+	if !obfPclnBuildModeSupported(ctxt.BuildMode) {
+		Exitf("-obfguardv4 is supported only for executable, PIE, and c-shared builds")
+	}
+	if !*flagObfEntryOff || !*flagObfPclnMagic {
+		Exitf("-obfguardv4 requires -obfentryoff and -obfmagic")
+	}
+	values := []struct {
+		flag uint64
+		name string
+	}{
+		{*flagObfGuardV4SealLo, "-obfguardv4seallo"},
+		{*flagObfGuardV4SealHi, "-obfguardv4sealhi"},
+		{*flagObfGuardV4Bootstrap, "-obfguardv4bootstrap"},
+		{*flagObfGuardV4Platform, "-obfguardv4platform"},
+		{*flagObfGuardV4Metadata, "-obfguardv4metadatakey"},
+	}
+	for _, value := range values {
+		if value.flag == 0 || value.flag == obfRuntimeGuardV4Unpatched {
+			Exitf("%s must be a non-zero non-sentinel 64-bit value", value.name)
+		}
+	}
+	sealSym := ctxt.loader.Lookup(obfRuntimeGuardV4SealSym, 0)
+	if sealSym == 0 {
+		Exitf("-obfguardv4 requires %s", obfRuntimeGuardV4SealSym)
+	}
+	sealUpdater := ctxt.loader.MakeSymbolUpdater(sealSym)
+	if sealUpdater.Size() < 16 {
+		Exitf("%s is too small for -obfguardv4", obfRuntimeGuardV4SealSym)
+	}
+	first, second := obfRuntimeGuardV3SealWords(ctxt.Arch.ByteOrder, *flagObfGuardV4SealLo)
+	sealUpdater.SetUint32(ctxt.Arch, 0, first)
+	sealUpdater.SetUint32(ctxt.Arch, 4, second)
+	first, second = obfRuntimeGuardV3SealWords(ctxt.Arch.ByteOrder, *flagObfGuardV4SealHi)
+	sealUpdater.SetUint32(ctxt.Arch, 8, first)
+	sealUpdater.SetUint32(ctxt.Arch, 12, second)
+	patchGuardV4Word(ctxt, obfRuntimeGuardV4BootstrapSym, *flagObfGuardV4Bootstrap)
+	patchGuardV4Word(ctxt, obfRuntimeGuardV4PlatformSym, *flagObfGuardV4Platform)
+	patchGuardV4Word(ctxt, obfRuntimeGuardV4MetadataKeySym, *flagObfGuardV4Metadata)
+	metadataSeal := obfRuntimeGuardV4MetadataSealFor(*flagObfGuardV4Metadata, uint64(state.nfunc), uint64(state.nfiles), uint64(ctxt.loader.SymSize(state.pclntab)))
+	patchGuardV4Word(ctxt, obfRuntimeGuardV4MetadataSealSym, metadataSeal)
+}
+
+func patchGuardV4Word(ctxt *Link, name string, value uint64) {
+	sym := ctxt.loader.Lookup(name, 0)
+	if sym == 0 {
+		Exitf("-obfguardv4 requires %s", name)
+	}
+	updater := ctxt.loader.MakeSymbolUpdater(sym)
+	if updater.Size() < 8 {
+		Exitf("%s is too small for -obfguardv4", name)
+	}
+	first, second := obfRuntimeGuardV3SealWords(ctxt.Arch.ByteOrder, value)
+	updater.SetUint32(ctxt.Arch, 0, first)
+	updater.SetUint32(ctxt.Arch, 4, second)
+}
+
+func obfRuntimeGuardV4MetadataSealFor(metadataKey, nfunc, nfiles, pclntableSize uint64) uint64 {
+	x := metadataKey ^ nfunc*0x9e3779b185ebca87
+	x ^= bits.RotateLeft64(nfiles*0xd6e8feb86659fd93, 19)
+	x ^= bits.RotateLeft64(pclntableSize^0xa4093822299f31d0, 37)
+	x ^= 0x1f83d9abfb41bd6b
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	if x == 0 || x == obfRuntimeGuardV4Unpatched {
+		return 0x510e527fade682d1
+	}
+	return x
+}
+
 func patchGuardV3Word(ctxt *Link, name string, value uint64) {
 	sym := ctxt.loader.Lookup(name, 0)
 	if sym == 0 {
@@ -557,14 +649,56 @@ func isObfuscatedPclnMagic(magic uint32) bool {
 const obfuscatedProtectedFuncPrefix = "obf.fn."
 
 func isObfuscatedProtectedFuncName(name string) bool {
-	if len(name) != len(obfuscatedProtectedFuncPrefix)+32 || !strings.HasPrefix(name, obfuscatedProtectedFuncPrefix) {
+	const hashLength = 32
+	if len(name) < len(obfuscatedProtectedFuncPrefix)+hashLength || !strings.HasPrefix(name, obfuscatedProtectedFuncPrefix) {
 		return false
 	}
-	for _, c := range name[len(obfuscatedProtectedFuncPrefix):] {
+	hashEnd := len(obfuscatedProtectedFuncPrefix) + hashLength
+	for _, c := range name[len(obfuscatedProtectedFuncPrefix):hashEnd] {
 		if c < '0' || c > '9' {
 			if c < 'a' || c > 'f' {
 				return false
 			}
+		}
+	}
+
+	suffix := name[hashEnd:]
+	if suffix == "" {
+		return true
+	}
+
+	// Some targets, including riscv64, materialize a long-range call through a
+	// linker-generated symbol named <target>-tramp<N>. A relocation with a
+	// non-zero addend uses <target><+/-offset>-tramp<N>. Treat only those
+	// precisely shaped derivatives as protected names.
+	trampolineAt := strings.LastIndex(suffix, "-tramp")
+	if trampolineAt < 0 || !isObfuscatedTrampolineIndex(suffix[trampolineAt+len("-tramp"):]) {
+		return false
+	}
+	offset := suffix[:trampolineAt]
+	if offset == "" {
+		return true
+	}
+	if len(offset) == 1 || (offset[0] != '+' && offset[0] != '-') {
+		return false
+	}
+	for _, c := range offset[1:] {
+		if c < '0' || c > '9' {
+			if c < 'a' || c > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isObfuscatedTrampolineIndex(index string) bool {
+	if index == "" {
+		return false
+	}
+	for _, c := range index {
+		if c < '0' || c > '9' {
+			return false
 		}
 	}
 	return true
@@ -1260,6 +1394,7 @@ func (ctxt *Link) pclntab(container loader.Bitmap) *pclntab {
 	ctxt.configureObfRuntimeGuardV3()
 	state.generateFunctab(ctxt, funcs, inlSyms, cuOffsets, nameOffsets)
 	state.generateFuncdata(ctxt, funcs, inlSyms)
+	ctxt.configureObfRuntimeGuardV4(state)
 
 	return state
 }

@@ -119,6 +119,36 @@ func TestObfuscatedStringKeyV5SeparateDomain(t *testing.T) {
 	}
 }
 
+func TestObfuscatedStringKeyV6SeparateDomain(t *testing.T) {
+	v2 := obfuscatedStringKeyV2("pkg.fn", "seed-a", "literal-a")
+	v3 := obfuscatedStringKeyV3("pkg.fn", "seed-a", "literal-a")
+	v4 := obfuscatedStringKeyV4("pkg.fn", "seed-a", "literal-a")
+	v5 := obfuscatedStringKeyV5("pkg.fn", "seed-a", "literal-a")
+	v6 := obfuscatedStringKeyV6("pkg.fn", "seed-a", "literal-a")
+	if v6 == v2 || v6 == v3 || v6 == v4 || v6 == v5 {
+		t.Fatal("String v6 reused an earlier string key domain")
+	}
+	if v6.Lease == 0 || v6.Ticket == 0 {
+		t.Fatalf("String v6 capability fields are invalid: lease=%#x ticket=%#x", v6.Lease, v6.Ticket)
+	}
+	if again := obfuscatedStringKeyV6("pkg.fn", "seed-a", "literal-a"); again != v6 {
+		t.Fatalf("String v6 is not deterministic: %#v != %#v", again, v6)
+	}
+	other := obfuscatedStringKeyV6("pkg.fn", "seed-a", "literal-b")
+	if other.Lease == v6.Lease || other.Ticket == v6.Ticket {
+		t.Fatal("String v6 literal did not rotate both capability fields")
+	}
+	for decoder := uint8(0); decoder < 4; decoder++ {
+		seen := make(map[byte]bool)
+		for i := 0; i < 32; i++ {
+			seen[obfuscatedStringMaskV6(v6.Lanes, v6.Lease, v6.Ticket, decoder, i)] = true
+		}
+		if len(seen) < 8 {
+			t.Fatalf("String v6 decoder %d produced weak short stream: %d distinct bytes", decoder, len(seen))
+		}
+	}
+}
+
 func BenchmarkObfuscatedStringKeyV2(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		obfuscatedStringKeyV2Sink = obfuscatedStringKeyV2(
